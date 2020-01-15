@@ -12,6 +12,7 @@ from logger import Logger
 import os
 import math
 import copy
+from random import random
 
 def nonSaturatingLossG_(fakeScores):
     return -torch.log(fakeSkores).mean()
@@ -103,6 +104,11 @@ class Trainer:
         #Loss function of generator
         self.paterm = config.paterm
         self.lambg = config.lambg
+        self.styleMixingProb = config.styleMixingProb
+
+        assert self.paterm == None or self.styleMixingProb == None, 'Trainer ERROR: The mixing styles regularization is not compatible with a pulling away term'
+        assert self.paterm == None or self.styleMixingProb == None, 'Trainer ERROR: The mixing styles regularization is not compatible with a pulling away term'
+        assert self.styleMixingProb == None or config.returnLatents == False, 'Trainer ERROR: It is not possible to return the latents while performing mixing regularization'
 
         self.lazyRegGenerator = max(config.computeGRegTermsEvery,1)
 
@@ -177,7 +183,7 @@ class Trainer:
                     self.imShown = curResLevel*(self.imgFading+self.imgStable) + imShownInRes
                     self.imShownInRes = imShownInRes
                     self.resolution = res
-                    self.reslvl = int(curResLevel)
+                    self.reslvl = int(curResLevel)+1
                     self.dataLoader.renewData(self.reslvl)
                     for i in range(curResLevel):
                         self.clrScheduler.step()
@@ -190,7 +196,7 @@ class Trainer:
                     self.imShown = imShownInRes
                     self.imShownInRes = imShownInRes
                     self.resolution = res
-                    self.reslvl = int(curResLevel)
+                    self.reslvl = int(curResLevel)+1
                     self.dataLoader.renewData(self.reslvl)
                         
     def createModels(self):
@@ -238,7 +244,13 @@ class Trainer:
         """ 
         if n == None: n = self.dataLoader.batchSize
         z = utils.getNoise(bs = n, latentSize = self.latentSize, device = self.device)
-        return *self.gen(z, curResLevel = self.reslvl, fadeWt=self.fadeWt), z
+
+        if random() < self.styleMixingProb:
+            zmix = utils.getNoise(bs = n, latentSize = self.latentSize, device = self.device)
+            return self.gen(z, zmix = z2, maxLayer = self.reslvl, fadeWt = self.fadeWt)
+
+
+        return *self.gen(z, maxLayer = self.reslvl, fadeWt=self.fadeWt), z
 
     def getBatchReals(self):
         """
@@ -260,25 +272,27 @@ class Trainer:
         utils.switchTrainable(self.crit, True)
         utils.switchTrainable(self.gen, False)
 
+        maxLayer = 2*self.reslvl+1
+
         # real
         real = self.dataLoader.get_batch()
-        cRealOut = self.crit(x=real, curResLevel = self.reslvl, fadeWt=self.fadeWt)
+        cRealOut = self.crit(x=real, maxLayer = maxLayer, fadeWt=self.fadeWt)
         
         # fake
         fake, *_ = self.getBatchFakes()
-        cFakeOut = self.crit(x=fake.detach(), curResLevel = self.reslvl, fadeWt=self.fadeWt)
+        cFakeOut = self.crit(x=fake.detach(), maxLayer = maxLayer, fadeWt=self.fadeWt)
         
         loss = self.critLoss(cRealOut, cFakeOut)
         
         if self.lossFunc == 'WGP' and self.batchShown % self.lazyRegCritic == self.lazyRegCritic-1:
             alpha = torch.rand(real.size(0), 1, 1, 1, device=self.device)
             interpols = (alpha*real + (1-alpha)*fake).detach().requires_grad_(True)
-            gradInterpols = self.crit.getGradientsWrtInputs(interpols, curResLevel=self.reslvl, fadeWt=self.fadeWt)
+            gradInterpols = self.crit.getGradientsWrtInputs(interpols, maxLayer = maxLayer, fadeWt=self.fadeWt)
             loss += self.lamb*gradientPenalization(gradInterpols,self.obj)
             loss += self.epsilon*driftLoss(cRealOut)
 
         elif self.lossFunc == 'NSL' and self.batchShown % self.lazyRegCritic == self.lazyRegCritic-1:
-            grads = self.crit.getGradientsWrtInputs(real, curResLevel=self.reslvl, fadeWt=self.fadeWt) 
+            grads = self.crit.getGradientsWrtInputs(real, maxLayer = maxLayer, fadeWt=self.fadeWt) 
             loss += self.lamb*R1GradientPenalization(grads)
 
         loss.backward(); self.cOptimizer.step()
@@ -292,14 +306,17 @@ class Trainer:
         self.gOptimizer.zero_grad()
         utils.switchTrainable(self.gen, True)
         utils.switchTrainable(self.crit, False)
+
+        maxLayer = 2*self.reslvl+1
         
         fake, *latents = self.getBatchFakes()
-        cFakeOut = self.crit(x=fake, fadeWt=self.fadeWt, curResLevel = self.reslvl)
+        cFakeOut = self.crit(x=fake, fadeWt=self.fadeWt, maxLayer = maxLayer)
         
         loss = self.genLoss(cFakeOut)
 
         if self.paterm != None and self.batchShown % self.lazyRegGenerator == self.lazyRegGenerator-1:
-            loss += self.lambg*self.gen.paTerm(latent, againstInput = self.paterm, curResLevel = self.reslvl, fadeWt = self.fadeWt)
+            latent = latents[0]
+            loss += self.lambg*self.gen.paTerm(latent, againstInput = self.paterm, maxLayer = maxLayer, fadeWt = self.fadeWt)
         
         loss.backward(); self.gOptimizer.step()
         

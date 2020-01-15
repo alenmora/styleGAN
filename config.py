@@ -67,7 +67,7 @@ parser.add_argument('--fmapDecay', type=float, default=1.)                      
 parser.add_argument('--useWeightScale', type=bool, default=True)                         #Wether to use weight scaling as in PGGAN
 parser.add_argument('--psiCut',type=float,default=1.5)                                   #Value at which to apply the psi truncation cut in the generator
 parser.add_argument('--maxCutLayer',type=float,default=None)                             #Maximum generator layer at which to apply the psi cut (None = deactivated)
-parser.add_argument('--styleMixingProb',type=float,default=0.9)                          #Probabilty to mix styles during training
+parser.add_argument('--styleMixingProb',nargs='?',type=float)                            #Probabilty to mix styles during training. If not specified, there is no mixing
 parser.add_argument('--synthesisNetwork', choices=['revised','skip','resnet'], default='skip')  #Network architecture for the generator synthesis
 parser.add_argument('--criticNetwork', choices=['revised','skip','resnet'], default='resnet')   #Network architecture for the critic 
 parser.add_argument('--stdDevGroup', type=int, default=8)                  #Size of the groups to calculate the std dev in the last block of the critic
@@ -89,3 +89,8 @@ parser.add_argument('--resumeTraining', nargs='*')  #Resumes a previous training
 
 ##Parse and save configuration
 config, _ = parser.parse_known_args()
+
+############################
+#  Decoder options
+############################
+parser.add_argument('--decoderNetwork', choices=['revised','skip','resnet'], default='resnet')  #Network architecture for the decoder

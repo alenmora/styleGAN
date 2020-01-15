@@ -20,8 +20,8 @@ class Mapping(nn.Module):
         mods = []
 
         inCh = self.latentSize
-        for layerId in range(self.mappingLayers):
-            outCh = self.nNeurons if layerId != (self.mappingLayers-1) else self.dLatentSize
+        for maxLayer in range(self.mappingLayers):
+            outCh = self.nNeurons if maxLayer != (self.mappingLayers-1) else self.dLatentSize
             mods.append(Linear(inCh, outCh, scaleWeights=self.scaleWeights))
             inCh = outCh
 
@@ -96,8 +96,8 @@ class Synthesis(nn.Module):
         self.noiseInputs = [] #Store the noise inputs for each layer
 
         if not self.randomizeNoise: #Only if we are not randomizing it every iteration
-            for layerId in range(self.nLayers):
-                resol = 2**((layerId+5)//2)
+            for maxLayer in range(self.nLayers):
+                resol = 2**((maxLayer+5)//2)
                 self.noiseInputs.append(torch.randn(1,1,resol,resol, device=self.device).requires_grad_(False))
 
         self.convs = nn.ModuleList() #Keeps the modulated convolutional modules
@@ -108,18 +108,18 @@ class Synthesis(nn.Module):
 
         self.cInput = torch.randn(1,nf(1),4,4, device=self.device).requires_grad_(False) #Constant random input
 
-        def layer(kernel, layerId): #Constructor of layers
-            resol = int(2**((layerId+5)//2)) #Recover the resolution of the current layer from its id (0 --> 4), (1 --> 8), (2 --> 8), (3 --> 16),...
-            inCh = nf(layerId+1) if layerId % 2 else nf(layerId) #Keep the same number of channels for the whole block
-            outCh = nf(layerId+1) if layerId % 2 else nf(layerId) #Keep the same number of channels for the whole block
+        def layer(kernel, maxLayer): #Constructor of layers
+            resol = int(2**((maxLayer+5)//2)) #Recover the resolution of the current layer from its id (0 --> 4), (1 --> 8), (2 --> 8), (3 --> 16),...
+            inCh = nf(maxLayer+1) if maxLayer % 2 else nf(maxLayer) #Keep the same number of channels for the whole block
+            outCh = nf(maxLayer+1) if maxLayer % 2 else nf(maxLayer) #Keep the same number of channels for the whole block
             
-            if not layerId % 2: #Even layer
+            if not maxLayer % 2: #Even layer
                 if self.mode != 'resnet': #add the toRGB module for the given resolution
                     self.toRGB.append(Conv2D(inCh=outCh, outCh=self.outCh, kernelSize=1, scaleWeights=self.scaleWeights))
                 
                 else: #Add the convolution modules for properly matching the channels during the residual connection
-                    if layerId < self.nLayers-1: # (the last layer --which is even-- does not require this module)
-                        self.lp.append(Conv2D(inCh=outCh, outCh=nf(layerId+1)))
+                    if maxLayer < self.nLayers-1: # (the last layer --which is even-- does not require this module)
+                        self.lp.append(Conv2D(inCh=outCh, outCh=nf(maxLayer+1)))
 
             #Add the required modulated convolutional module
             self.convs.append(ModulatedConv2D(inStyle=self.dLatentSize, inCh=inCh, outCh=outCh, kernel=kernel))
@@ -134,8 +134,8 @@ class Synthesis(nn.Module):
             #Add the biases
             self.biases.append(torch.zeros(1,outCh).requires_grad_(True)) 
         
-        for layerId in range(self.nLayers): #Create the layers from to self.nLayers-1
-            layer(kernel=3, layerId=layerId)  
+        for maxLayer in range(self.nLayers): #Create the layers from to self.nLayers-1
+            layer(kernel=3, maxLayer=maxLayer)  
 
         if self.mode == 'resnet': #Add the only toRGB module in the resnet architecture
             self.toRGB.append(Conv2D(inCh=nf(self.nLayers),outCh=self.outCh, kernelSize=1, scaleWeights=self.scaleWeights))
@@ -149,11 +149,57 @@ class Synthesis(nn.Module):
         """
         if x == None: x = self.cInput
         if self.mode == 'revised':
-            return self.forwardProgressive_(x,y,*args,**kwargs)
+            maxLayer = kwargs['maxLayer']
+            fadeWt = kwargs['fadeWt']
+            assert maxLayer != None, 'Module Synthesis ERROR: The forward pass in the revised mode requires a value for the current resolution level'
+            assert fadeWt != None, 'Module Synthesis ERROR: The forward pass in the revised mode requires a value for the fading weight'
+            return self.forwardProgressive_(x,y,maxLayer=maxLayer,fadeWt=fadeWt)
         elif self.mode == 'skip':
             return self.forwardSkip_(x,y)
         elif self.mode == 'resnet':
             return self.forwardResnet_(x,y)
+
+    def forwardTo(self, y, maxLayer, *args, x = None, **kwargs):
+        """
+        Forward tensor y up to layer maxLayer
+        y (tensor): the disentangled latent vector
+        maxLayer (int): the layer to forward the tensor up to
+        x (tentsor): the constant input map
+        *args, **kwargs: extra arguments for the forward step in the pogressive growing configuration
+        """
+        if x == None: x = self.cInput
+        assert maxLayer <= self.nLayers, f'Module Synthesis ERROR: The maxLayer {maxLayer} value in the forwardTo function is larger than the number of layers in the network {self.nLayers}'
+        assert maxLayer >= 0, f'Module Synthesis ERROR: The maxLayer {maxLayer} value in the forwardTo function must be a nonnegative integer'
+        if self.mode == 'revised':
+            fadeWt = kwargs['fadeWt']
+            assert fadeWt != None, 'Module Synthesis ERROR: The forwardTo pass in the revised mode requires a value for the fading weight'
+            return self.forwardProgressive_(x,y,maxLayer=maxLayer,fadeWt=fadeWt)
+        elif self.mode == 'skip':
+            return self.forwardSkip_(x,y,maxLayer=maxLayer)
+        elif self.mode == 'resnet':
+            return self.forwardResnet_(x,y,maxLayer=maxLayer)
+
+    def forwardFrom(self, y, minLayer, *args, x = None, **kwargs):
+        """
+        Forward tensor y up to layer maxLayer
+        y (tensor): the disentangled latent vector
+        maxLayer (int): the layer to forward the tensor up to
+        x (tentsor): the constant input map
+        *args, **kwargs: extra arguments for the forward step in the pogressive growing configuration
+        """
+        if x == None: x = self.cInput
+        assert minLayer <= self.nLayers, f'Module Synthesis ERROR: The maxLayer {minLayer} value in the forwardFrom function is larger than the number of layers in the network {self.nLayers}'
+        assert minLayer >= 0, f'Module Synthesis ERROR: The maxLayer {minLayer} value in the forwardFrom function must be a nonnegative integer'
+        if self.mode == 'revised':
+            maxLayer = kwargs['maxLayer']
+            fadeWt = kwargs['fadeWt']
+            assert maxLayer != None, 'Module Synthesis ERROR: The forward pass in the revised mode requires a value for the current resolution level'
+            assert fadeWt != None, 'Module Synthesis ERROR: The forward pass in the revised mode requires a value for the fading weight'
+            return self.forwardProgressive_(x,y,minLayer=minLayer,maxLayer=maxLayer,fadeWt=fadeWt)
+        elif self.mode == 'skip':
+            return self.forwardSkip_(x,y,minLayer=minLayer)
+        elif self.mode == 'resnet':
+            return self.forwardResnet_(x,y,minLayer=minLayer)
 
     def paTerm(self, y, *args, x = None, againstInput = 1, **kwargs):
         """
@@ -181,42 +227,43 @@ class Synthesis(nn.Module):
         x = self.activation(x)
         return x
            
-    def forwardProgressive_(self, x, y, layerId = None, fadeWt = 1.):
+    def forwardProgressive_(self, x, y, minLayer = 0, maxLayer = None, fadeWt = 1.):
         """
         Perform a forward pass using
         the progressive growing architecture
         """
-        assert layerId % 2 == 0, f'Synthesis Module ERROR: the layer ID in the forward call must be an even integer ({layerID})'
-        asser layerId < len(self.convs), f'Synthesis Module ERROR: the layer ID {layerId} is out of bounds {len(self.convs)}'
-        if layerId == None:
-            layerId = len(self.convs)-1
+        if maxLayer == None:
+            maxLayer = len(self.convs)-1
 
-        for layer in range(layerId-1): #Apply all layers up to layer LayerId-2
+        assert maxLayer % 2 == 0, f'Synthesis Module ERROR: the layer ID in the forward call must be an even integer ({layerID})'
+        assert maxLayer < len(self.convs), f'Synthesis Module ERROR: the layer ID {maxLayer} is out of bounds {len(self.convs)}'
+        
+        for layer in range(maxLayer-1): #Apply all layers up to layer LayerId-2
                 if layer % 2:
                     x = F.interpolate(x, scale_factor=2, mode=self.upsample)
                 self.applyOneLayer(x, y, layer)
         
         if fadeWt < 1:   #We are in a fade stage
             prev_x = x #Get the output for the previous resolution
-            prev_x = self.toRGB[layerId//2-1](prev_x) #Transform it to RGB
+            prev_x = self.toRGB[maxLayer//2-1](prev_x) #Transform it to RGB
             prev_x = F.interpolate(prev_x, scale_factor=2, mode=self.upsample) 
 
             x = F.interpolate(x, scale_factor=2, mode=self.upsample)
-            x = self.applyOneLayer(x, y, layerId-1) 
-            x = self.applyOneLayer(x, y, layerId)   #Compute the output for the current resolution
-            x = self.toRGB[layerId//2](x) #Transform it to RGB       
+            x = self.applyOneLayer(x, y, maxLayer-1) 
+            x = self.applyOneLayer(x, y, maxLayer)   #Compute the output for the current resolution
+            x = self.toRGB[maxLayer//2](x) #Transform it to RGB       
         
             x = fadeWt*x + (1-fadeWt)*prev_x #Interpolate
         
         else:
             x = F.interpolate(x, scale_factor=2, mode=self.upsample)
-            x = self.applyOneLayer(x, y, layerId-1) 
-            x = self.applyOneLayer(x, y, layerId)   #Compute the output for the current resolution
-            x = self.toRGB[layerId//2](x) #Transform it to RGB       
+            x = self.applyOneLayer(x, y, maxLayer-1) 
+            x = self.applyOneLayer(x, y, maxLayer)   #Compute the output for the current resolution
+            x = self.toRGB[maxLayer//2](x) #Transform it to RGB       
 
         return x
     
-    def forwardSkip_(self, x, y):
+    def forwardSkip_(self, x, y, minLayer = 0, maxLayer = self.nLayers):
         """
         Perform a forward pass using
         the architecture with skip connections
@@ -234,7 +281,7 @@ class Synthesis(nn.Module):
         
         return output
 
-    def forwardResnet_(self, x, y):
+    def forwardResnet_(self, x, y, minLayer = 0, maxLayer = self.nLayers):
         """
         Perform a forward pass using
         the architecture with residual networks
