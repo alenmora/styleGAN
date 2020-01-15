@@ -206,7 +206,6 @@ class Logger:
             entangled = latents[1]
             disentangled = latents[0]
 
-            text = fName+'\t'+str(entangled.item())+'\t'+str(disentangled.item())+'\n'
+            text = fName+'\t'+str(entangled)+'\t'+str(disentangled)+'\n'
             f = os.path.join(self.logPath, self.latentsFile)
-
             utils.writeFile(f, text, 'a')

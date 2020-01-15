@@ -25,12 +25,7 @@ class DataLoader:
         self.reslevel = 0
         self.resolutions = 2**np.linspace(np.log2(self.resolution, self.endResolution), endpoint=True)
         self.nres = len(self.resolutions)
-        self.tickPerStage = math.ceil(config.loops/(2*(nres-1)+nres)) #Same number of ticks for fading and stable stages
 
-        self.nTicks = 0.
-        self.tick = config.tick
-        self.loops = config.loops
-        
         self.num_workers = 0
         
         self.renewData(self.resolution)
