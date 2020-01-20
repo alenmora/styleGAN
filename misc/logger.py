@@ -205,6 +205,7 @@ class Logger(_Logger):
                         'criticLossReals':self.criticLossReals,
                         'criticLossFakes':self.criticLossFakes,
                         'batchShown': self.trainer.batchShown,
+                        'meanPathLength': self.trainer.meanPathLength,
                     }, path)
 
     def outputPictures(self):

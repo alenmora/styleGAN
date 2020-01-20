@@ -13,7 +13,7 @@ class Generator(nn.Module):
     def __init__(self, latentSize = 256, dLatentSize = 256, mappingLayers = 4, neuronsInMappingLayers = 256, normalizeLatents = True,
                 resolution = 64, fmapBase = 2048, fmapDecay = 1, fmapMax = 256, fmapMin = 1, randomizeNoise = False, 
                 activation = 'lrelu', scaleWeights = False, outCh = 3, upsample = 'bilinear', synthesisMode = 'skip', psiCut = 0.7,
-                maxCutLayer = -1, returnLatents = False, **kwargs):
+                maxCutLayer = -1, **kwargs):
         
         super().__init__()
         self.mapping = Mapping(latentSize = latentSize, dLatentSize = dLatentSize, mappingLayers = mappingLayers, 
@@ -27,8 +27,6 @@ class Generator(nn.Module):
         
         self.psiCut = psiCut
         self.maxCutLayer = self.synthesis.nLayers-1 if maxCutLayer < 0 else maxCutLayer
-
-        self.returnLatents = returnLatents
         
     def forward(self, z, *args, zmix = None, wmix = None, cutLayer = None, **kwargs):
         """
@@ -57,11 +55,8 @@ class Generator(nn.Module):
             g = self.synthesis.forwardFrom(wmix, x, extraOutput, layer, *args, **kwargs)
             return g
 
-        if self.returnLatents:
-            return self.synthesis.forward(w, *args, **kwargs), w
-        else:
-            return self.synthesis.forward(w, *args, **kwargs)
-
+        return [self.synthesis.forward(w, *args, **kwargs), w]
+        
     def paTerm(self, z, *args, againstInput = 1, **kwargs):
         """
         Calculates the pulling away term, as explained in arXiv:1609.03126v4.

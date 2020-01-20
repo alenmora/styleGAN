@@ -3,6 +3,7 @@ import torch.nn as nn
 import numpy as np
 import argparse
 from torch.optim import Adam, lr_scheduler
+import torch.nn.functional as F
 import torch.autograd as autograd
 from datetime import datetime
 from models.generatorNetwork import Generator
@@ -21,8 +22,13 @@ def applyLossScaling(value):
 def undoLossScaling(value):
     return value*2**(-value)
 
+def NonSaturatingLoss(value, truth):
+    truth = -1*truth
+    return F.softplus(truth*value).mean()
+
 def WassersteinLoss(value, truth):
-    return (value*truth.mul(-2).add(1)).mean()
+    truth = -1*truth
+    return (truth*value).mean()
 
 class Trainer:
     """
@@ -77,6 +83,12 @@ class Trainer:
         self.lambg = float(topt.lambg)
         self.gLazyReg = max(topt.gLazyReg,1)
         self.styleMixingProb = float(topt.styleMixingProb)
+
+        self.meanPathLength = 0.
+
+        self.plDecay = topt.meanPathLengthDecay
+
+        self.pathRegWeight = topt.meanPathLengthRWeight
 
         assert self.paterm is None or not self.styleMixingProb, self.logger.error('Trainer ERROR: The mixing styles regularization is not compatible with a pulling away term')
 
@@ -205,6 +217,7 @@ class Trainer:
                     self.cOptimizer.load_state_dict(stateDict['cOptimizer'])
                     self.gOptimizer.load_state_dict(stateDict['gOptimizer'])
                     self.batchShown = stateDict['batchShown']
+                    self.meanPathLength = stateDict['meanPathLength']
                     self.logger.debug(f'And the optimizers states as well')
                 
                 return True
@@ -271,7 +284,7 @@ class Trainer:
         if self.applyLossScaling:
             ddx = undoLossScaling(ddx)
             
-        return ((ddx.norm(dim=1)-self.obj)**2).mean()/(self.obj+1e-8)**2
+        return ((ddx.norm(dim=1)-self.obj).pow(2)).mean()/(self.obj+1e-8)**2
 
     def R1GradientPenalization(self, reals):
         reals = reals.clone().requires_grad_(True)
@@ -289,14 +302,26 @@ class Trainer:
         if self.applyLossScaling:
             ddx = undoLossScaling(ddx)
 
-        return 0.5*(ddx.norm(dim=1)**2).mean()
+        return 0.5*(ddx.pow(2).sum(dim=1)).mean()
 
+    def GradientPathRegularization(self, fakes, latents, meanPathLength, decay=0.01):
+        noise = torch.randn_like(fakes) / math.sqrt(fakes.size(2)*fakes.size(3))
+
+        ddx = autograd.grad(outputs=(fakes*noise).sum(), inputs=latents, create_graph=True)[0]
+
+        pathLenghts = torch.sqrt(ddx.pow(2).sum(dim=2).mean(dim=1))
+
+        pathMean = meanPathLength + decay* (pathLengths.mean() - meanPathLength)
+
+        pathPenalty = (pathLengths - pathMean).pow(2).mean()
+
+        return pathPenalty, pathmean.detach(), pathLengths
     
     def trainCritic(self):
         """
         Train the critic for one step and store outputs in logger
         """
-        self.cOptimizer.zero_grad()
+        self.crit.zero_grad()
         utils.switchTrainable(self.crit, True)
         utils.switchTrainable(self.gen, False)
 
@@ -308,17 +333,25 @@ class Trainer:
         fake, *_ = self.getBatchFakes()
         cFakeOut = self.crit(x=fake.detach())
         
-        lossReals = self.criterion(cRealOut, torch.ones_like(cRealOut, device=self.device))
-        lossFakes = self.criterion(cFakeOut, torch.zeros_like(cFakeOut, device=self.device))
+        lossReals = self.criterion(cRealOut, truth = 1)
+        lossFakes = self.criterion(cFakeOut, truth = -1)
 
         loss = lossReals+lossFakes
+
+        loss.backward(); self.cOptimizer.step
         
         if self.batchShown % self.cLazyReg == self.cLazyReg-1:
-            if self.lambR2: loss += self.lambR2*self.R2GradientPenalization(real, fake)
-            if self.epsilon: loss += self.epsilon*(cRealOut**2).mean()
-            if self.lambR1: loss += self.lambR1*self.R1GradientPenalization(real)
+            self.crit.zero_grad()
+            extraLoss = 0
+            if self.lambR2: 
+                extraLoss += self.cLazyReg*self.lambR2*self.R2GradientPenalization(real, fake)
+            if self.epsilon: 
+                extraLoss += self.epsilon*(cRealOut**2).mean()
+            if self.lambR1: 
+                extraLoss += self.lambR1*self.R1GradientPenalization(real)
 
-        loss.backward(); self.cOptimizer.step()
+            if extraLoss > 0:
+                extraLoss.backward(); self.cOptimizer.step()
         
         if self.clrScheduler is not None: self.clrScheduler.step() #Reduce learning rate
 
@@ -328,20 +361,30 @@ class Trainer:
         """
         Train Generator for 1 step and store outputs in logger
         """
-        self.gOptimizer.zero_grad()
+        self.gen.zero_grad()
         utils.switchTrainable(self.gen, True)
         utils.switchTrainable(self.crit, False)
         
         fake, *latents = self.getBatchFakes()
         cFakeOut = self.crit(fake)
 
-        loss = self.criterion(cFakeOut, torch.ones_like(cFakeOut, device=self.device))
+        loss = self.criterion(cFakeOut, truth = 1)
+
+        loss.backward(); self.gOptimizer.step() 
 
         if self.paterm is not None and self.batchShown % self.gLazyReg == self.gLazyReg-1:
-            latent = latents[0]
-            loss += self.lambg*self.gen.paTerm(latent, againstInput = self.paterm)
+            self.gen.zero_grad()
+            dlatent = latents[0]
+
+            extraLoss, self.meanPathLength, pathLengths = self.GradientPathRegularization(fake, dlatent, self.meanPathLength, self.plDecay)
+
+            extraLoss = extraLoss*self.gLazyReg*self.pathRegWeight
+
+            if self.lambg and self.paterm in [0,1,2]:
+                extraLoss += self.lambg*self.gen.paTerm(latent, againstInput = self.paterm)
         
-        loss.backward(); self.gOptimizer.step() 
+            if extraLoss > 0:
+                extraLoss.backward(); self.gOptimizer.step() 
         
         if self.glrScheduler is not None: self.glrScheduler.step() #Reduce learning rate
                 

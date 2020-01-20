@@ -41,9 +41,11 @@ cfg.trainer.lossFunc = 'NSL'           #Loss model used. Default is Non Saturati
 cfg.trainer.applyLossScaling = False   #Wether to scale any loss function before calculating any gradient penalization term or not
 
 cfg.trainer.paterm = -1                #Include a pulling away term in the generator (arXiv =1609.03126v4). The user should specify if the term is as described in the original paper (by passing 0 to the flag), or centered around the similarity (by passing 1) or the squared similarity (by passing 2) of the latent vectors. -1 to deactivate
-cfg.trainer.lambg = 1.                 #Weight of the pulling-away term in the generator
+cfg.trainer.lambg = 0.                 #Weight of the pulling-away term in the generator loss function
 cfg.trainer.gLazyReg = 32              #Number of minibatches shown before computing the regularization term for the generator (lazy regularization) 
 cfg.trainer.styleMixingProb = 0.9      #Probabilty to mix styles during training
+cfg.trainer.meanPathLengthDecay = 0.01 #Decay constant for the exponential running averaging of the path length 
+cfg.trainer.pathLengthRWeight = 2      #Weight of the path regularization term in the generator loss function
 
 cfg.trainer.nCritPerGen = 1            #Number of critic training loops per generator training loop
 

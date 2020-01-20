@@ -64,6 +64,7 @@ class Conv2D(nn.Module):
         super().__init__()
         if padding == 'same': #Make sure the output tensors for each channel are the same size as the input ones
             padding = kernelSize // 2
+            #padding = ((size - 1) * (stride - 1) + dilation * (kernel - 1)) // 2
 
         self.padding = padding
 
@@ -117,9 +118,12 @@ class ModulatedConv2D(nn.Module):
             padding = kernelSize // 2
         
         self.kernelSize = kernelSize
+
         self.padding = padding
 
         self.lrmul = lrmul
+
+        self.outCh = outCh
         
         # Get weights
         self.weights = nn.Parameter(torch.zeros(1,outCh,inCh,self.kernelSize,self.kernelSize), requires_grad=True)
@@ -147,26 +151,20 @@ class ModulatedConv2D(nn.Module):
         self.name = f'ModulatedConv2D: convolution {inCh} --> {outCh}; style length: {inStyle}'
         
     def forward(self, x, y):
-        batchSize = x.size(0)
-        s = self.linear(y)                                                                 #N x inCh
-        s = s.view(batchSize,1,s.size(1),1,1)                                              #N x 1     x inCh x 1 x 1 
-        modul = self.weights.mul(s)                                                        #N x outCh x inCh x k x k - Modulate by multiplication over the inCh dimension
-        norm = modul.view(batchSize, modul.size(1), -1).norm(dim=2, keepdim=True)+1e-8     #N x outCh x 1 - Norm for demodulation, which is calculated for each batch over the input weights of the same channel
-        demodul = modul.div(norm.view(*norm.shape,1,1))                                    #N x outCh x inCh x k x k - Demodulate by dividing over the norm 
+        batchSize, inCh, h, w = x.shape
+        s = self.linear(y).view(batchSize, 1, inCh, 1, 1)                                  #N x 1     x inCh x 1 x 1 
+        modul = self.wtScale*self.weights.mul(s)                                           #N x outCh x inCh x k x k - Modulate by multiplication over the inCh dimension
+        norm = torch.rqsrt(modul.pow(2).sum([2,3,4], keepdim=True)+1e-8)                   #N x outCh x 1 x1 x 1 - Norm for demodulation, which is calculated for each batch over the input weights of the same channel
+        modul = modul * norm                                                               #N x outCh x inCh x k x k - Demodulate by dividing over the norm 
         
-        output = []
-        for i in range(s.size(0)):
-            bias = None
-            if self.bias is not None: bias = self.bias*self.lrmul
-            output.append(F.conv2d(x[i].view(1,*x[i].shape),
-                                    demodul[i]*self.wtScale, 
-                                    padding=self.padding, 
-                                    bias = bias
-                                  ))    #1 x outCh x H x W
+        x = x.view(1, batchSize*inCh, h, w)
+        modul = modul.view(batchSize*outCh, inCh, self.kernelSize, self.kernelSize)
+    
+        bias = None
+        if self.bias is not None: bias = self.bias*self.lrmul
+        output = F.conv2d(x, modul, padding=self.padding, bias = bias, groups=batchSize)   #N x outCh x H x W
         
-        output = torch.cat(output, dim=0)  #N x outCh x H x W
-        
-        return output
+        return output.view(batchSize, self.outCh, *output.shape[2:])
 
     def __repr__(self):
         return self.name

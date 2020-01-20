@@ -60,7 +60,6 @@ lopt = opt.logger
                 }
 
         #Generator model parameters
-        gopt.returnLatents = True #Return disentangled latents (w) as inputs for the decoder
         self.gen = Generator(**common, **gopt).to(self.device)
         self.latentSize = self.gen.mapping.latentSize
 

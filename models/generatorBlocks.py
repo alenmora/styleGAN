@@ -149,7 +149,7 @@ class Synthesis(nn.Module):
         *args, **kwargs: extra arguments for the forward step in the pogressive growing configuration
         """
         bs = y.size(0)
-        if x is None: x = self.cInput.repeat_interleave(bs,dim=0) #Repeat constant input for each style
+        if x is None: x = self.cInput.repeat(bs,1, 1, 1) #Repeat constant input for each style
         if self.mode == 'skip':
             return self.forwardSkip_(x,y)
         elif self.mode == 'resnet':
