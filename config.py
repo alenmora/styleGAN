@@ -1,96 +1,149 @@
 # StyleGAN2 configuration options
 
-import argparse, time
-parser = argparse.ArgumentParser('StyleGAN2')
+from yacs.config import CfgNode as CN
+from torch import cuda
+import logging
+
+cfg = CN()
 
 ############################
-#  Paths and inputs
+#  Global options
 ############################
 
-parser.add_argument('--logPath', type=str, default='./styleGAN2/')       # Folder were the training output logs are stored
-parser.add_argument('--dataPath', type=str, default='./data/')           # Folder were the training data is stored
-parser.add_argument('--preWtsFile', type=str, default=None)               # File to get the pretrained weights from
+cfg.device = 'cuda' if cuda.is_available() else 'cpu'
+cfg.deviceId = '0'
+
+cfg.preWtsFile = ""              # File to get the pretrained weights from
+
+cfg.tick = 1000                  #Unit of images shown (to make input compact)
+cfg.loops = 6500                 #Total number of training ticks
 
 ############################
-#  Training parameters
+#  Data options
 ############################
 
-parser.add_argument('--tick', type=int, default=1000)                      #Unit of images shown (to make input compact)
-parser.add_argument('--loops', type=int, default=10000)                    #Total number of training ticks
-parser.add_argument('--gLR', type=float, default=0.001)                    #Generator learning rate
-parser.add_argument('--gLRDecay', type=float, default=0.5)                 #Generator learning rate decay constant 
-parser.add_argument('--glRDecayEvery', type=int, default=800)              #(Approx) Number of ticks shown before applying the decay to the generator learning rate
-parser.add_argument('--gLRWdecay', type=float, default=0.)                 #Generator weight decay constant
-parser.add_argument('--cLR', type=float, default=0.001)                    #Critic learning rate
-parser.add_argument('--cLRDecay', type=float, default=0.5)                 #Critic learning rate decay constant 
-parser.add_argument('--glRDecayEvery', type=int, default=800)              #(Approx) Number of ticks shown before applying the decay to the critic learning rate
-parser.add_argument('--cLRWdecay', type=float, default=0.)                 #Critic weight decay constant
-parser.add_argument('--nCritPerGen', type=int, default=1)                  #Number of critic training loops per generator training loop
-parser.add_argument('--computeGRegTermsEvery', type=int, default=16)       #Number of minibatches shown before computing the regularization term for the generator (lazy regularization) 
-parser.add_argument('--computeCRegTermsEvery', type=int, default=32)       #Number of minibatches shown before computing the regularization term for the critic (lazy regularization) 
-parser.add_argument('--gOptimizerBetas', type=str, default='0.0 0.99')     #Generator adam optimizer beta parameters
-parser.add_argument('--cOptimizerBetas', type=str, default='0.0 0.99')     #Critic adam optimizer beta parameters
-parser.add_argument('--lossFunc', choices=['DWD','NSL'], default='WD')     #Loss model used. Default is Wasserstein's Distance (WD). The other option is NSL (Non Saturating Loss)
-parser.add_argument('--lamb', type=float, default=10)                         #Weight of the extra GP loss term (WD) or the R1 (0-centered GP) regularization term (NSL) in the critic loss function
+cfg.dataLoader = CN()
 
-#Extra hyperparameters for the WD loss function (extra terms: gradient penalty and drift loss)
-parser.add_argument('--obj', type=float, default=450)                      #Objective value for the gradient norm in GP regularization (arXiv:1704.00028v3)
-parser.add_argument('--epsilon', type=float, default=1e-3)                 #Weight of the loss term related to the magnitud of the loss function for the critic
+cfg.dataLoader.dataPath = './data/'     # Folder were the training data is stored
+cfg.dataLoader.resolution = 64          #Final image resolution. If not specified, gets it from the first image in the training data
+cfg.dataLoader.noChannels = 3           #Number of input and output channels. If not specified, gets it from the first image in the training data
+cfg.dataLoader.batchSize = 24
+cfg.dataLoader.numWorkers = 0
 
-parser.add_argument('--paterm', nargs='?')                                 #Include a pulling away term in the generator (arXiv:1609.03126v4). The user should specify if the term is as described in the original paper (by passing False to the flag), or centered around the distance of the inputs (by passing True)
-parser.add_argument('--lambg', type=float, default=1)                      #Weiht of the pulling-away term in the generator
-parser.add_argument('--unrollCritic', nargs='?', type=int)                 #For an integer value n greater than 1, it unrolls the critic n steps (arXiv:1611.02163v4)
+############################
+#  Training Options
+############################
+
+cfg.trainer = CN()
+
+cfg.trainer.resumeTraining = False     #Wether to resume a previous training. The user must specify the number of images already shown in the last training session
+cfg.trainer.lossFunc = 'NSL'           #Loss model used. Default is Non Saturating Loss (NSL). The other options are Wasserstein's Distance (WD) and Logistic
+cfg.trainer.applyLossScaling = False   #Wether to scale any loss function before calculating any gradient penalization term or not
+
+cfg.trainer.paterm = -1                #Include a pulling away term in the generator (arXiv =1609.03126v4). The user should specify if the term is as described in the original paper (by passing 0 to the flag), or centered around the similarity (by passing 1) or the squared similarity (by passing 2) of the latent vectors. -1 to deactivate
+cfg.trainer.lambg = 1.                 #Weight of the pulling-away term in the generator
+cfg.trainer.gLazyReg = 32              #Number of minibatches shown before computing the regularization term for the generator (lazy regularization) 
+cfg.trainer.styleMixingProb = 0.9      #Probabilty to mix styles during training
+
+cfg.trainer.nCritPerGen = 1            #Number of critic training loops per generator training loop
+
+cfg.trainer.lambR2 = 0.                #Weight of the extra R2 gradient penalization (0 = Deactivated)
+cfg.trainer.obj = 450                  #Objective value for the gradient norm in R2 regularization (arXiv =1704.00028v3)
+
+cfg.trainer.lambR1 = 10.               #Weight of the extra R1 gradient penalization
+
+cfg.trainer.epsilon = 1e-3             #Weight of the loss term related to the magnitud of the real samples' loss from the critic
+
+cfg.trainer.cLazyReg = 32              #Number of minibatches shown before computing the regularization term for the critic (lazy regularization) 
+
+cfg.trainer.unrollCritic = 0           #For an integer greater than 1, it unrolls the critic n steps (arXiv =1611.02163v4)
+
+############################
+#  Common model Options
+############################
+
+cfg.model = CN()
+
+cfg.model.fmapMax = 256             #Maximum number of channels in a convolutional block
+cfg.model.fmapMin = 1               #Minimum number of channels in a convolutional block
+cfg.model.fmapBase = 2048           #Parameter to calculate the number of channels in each block = nChannels = max(min(fmapMax, 4*fmapBase/(resolution**fmapDecay), fmapMin)
+cfg.model.fmapDecay = 1.           #Parameter to calculate the number of channels in each block = nChannels = max(min(fmapMax, 4*fmapBase/(resolution**fmapDecay), fmapMin)
+cfg.model.activation = 'lrelu'      #Which activation function to use for all networks
+cfg.model.sampleMode = 'bilinear'   #Algorithm to use for upsampling and downsampling tensors
+
+############################
+#  Generator model Options
+############################
+
+cfg.model.gen = CN()
+
+cfg.model.gen.psiCut = 0.8                   #Value at which to apply the psi truncation cut in the generator disentangled latent
+cfg.model.gen.maxCutLayer = -1               #Maximum generator layer at which to apply the psi cut (-1 = last layer)
+cfg.model.gen.synthesisNetwork = 'skip'      #Network architecture for the generator synthesis. The other option is 'resnet'
+cfg.model.gen.latentSize = 256               #Size of the latent vector (z)
+cfg.model.gen.dLatentSize = 256              #Size of the disentangled latent vector (w)
+cfg.model.gen.normalizeLatents = False       #Wether to normalize the latent vector (z) before feeding it to the mapping network
+cfg.model.gen.mappingLayers = 4              #Number of mapping layers
+cfg.model.gen.neuronsInMappingLayers = 256   #Number of neurons in each of the mapping layers 
+cfg.model.gen.randomizeNoise = False         #Wether to randomize noise inputs every time
+cfg.model.gen.scaleWeights = False           #Wether to scale the weights for equalized learning
+cfg.model.gen.returnLatents = False          #Wether to store the disentangled latents (w) together with the output image
+
+cfg.optim = CN()
+############################
+#  Gen optimizer Options
+############################
+
+cfg.optim.gen = CN()
+
+cfg.optim.gen.lr = 0.003
+cfg.optim.gen.beta1 = 0.
+cfg.optim.gen.beta2 = 0.99
+cfg.optim.gen.eps = 1e-8
+cfg.optim.gen.lrDecay =0.1                #Generator learning rate decay constant 
+cfg.optim.gen.lrDecayEvery = 2000         #(Approx) Number of ticks shown before applying the decay to the generator learning rate
+cfg.optim.gen.lrWDecay = 0.               #Generator weight decay constant
+
+############################
+#  Critic model Options
+############################
+
+cfg.model.crit = CN()
+
+cfg.model.crit.scaleWeights = True     #Wether to use weight scaling as in PGGAN in the discriminator
+cfg.model.crit.network = 'resnet'      #Network architecture for the critic. The other option is 'skip'
+cfg.model.crit.stdDevGroupSize = 8     #Size of the groups to calculate the std dev in the last block of the critic
+
+############################
+#  Crit optimizer Options
+############################
+
+cfg.optim.crit = CN()
+
+cfg.optim.crit.lr = 0.003
+cfg.optim.crit.beta1 = 0.
+cfg.optim.crit.beta2 = 0.99
+cfg.optim.crit.eps = 1e-8
+cfg.optim.crit.lrDecay =0.1                #Critic learning rate decay constant 
+cfg.optim.crit.lrDecayEvery = 2000         #(Approx) Number of ticks shown before applying the decay to the critic learning rate
+cfg.optim.crit.lrWDecay = 0.               #Critic weight decay constant
 
 ############################
 #  Logging
 ############################
 
-parser.add_argument('--deactivateLog', action='store_true')       #If passed, there will be no logging
-parser.add_argument('--saveModelEvery', type=int, default=100)    #(Approx) Number of ticks shown before saving a checkpoint of the model
-parser.add_argument('--saveImageEvery', type=int, default=50)     #(Approx) Number of ticks shown before generating a set of images and saving them in the log directory
-parser.add_argument('--logStep', type=int, default=3)             #(Approx) Number of ticks shown before writing a log in the log directory
-parser.add_argument('--returnLatents',action='store_true')        #Return, together with the images, a text file with the entangled and disentangled latent vectors
+cfg.logger = CN()
 
-############################
-#  Network parameters
-############################
-
-parser.add_argument('--fmapMax', type=int, default=256)                                  #Maximum number of channels in convolutional block
-parser.add_argument('--fmapMin', type=int, default=1)                                    #Minimum number of channels in convolutional block
-
-# from the equation nchannels = 4*fmapBase/(resolution**fmapDecay). 
-# The number of channels of the constant input tensor are determined from
-# this equation and the previous cut values as well
-parser.add_argument('--fmapBase', type=int, default=2048)                                #Parameter to calculate the number of channels in each block
-parser.add_argument('--fmapDecay', type=float, default=1.)                               #Parameter to calculate the number of channels in each block
-
-parser.add_argument('--useWeightScale', type=bool, default=True)                         #Wether to use weight scaling as in PGGAN
-parser.add_argument('--psiCut',type=float,default=1.5)                                   #Value at which to apply the psi truncation cut in the generator
-parser.add_argument('--maxCutLayer',type=float,default=None)                             #Maximum generator layer at which to apply the psi cut (None = deactivated)
-parser.add_argument('--styleMixingProb',nargs='?',type=float)                            #Probabilty to mix styles during training. If not specified, there is no mixing
-parser.add_argument('--synthesisNetwork', choices=['revised','skip','resnet'], default='skip')  #Network architecture for the generator synthesis
-parser.add_argument('--criticNetwork', choices=['revised','skip','resnet'], default='resnet')   #Network architecture for the critic 
-parser.add_argument('--stdDevGroup', type=int, default=8)                  #Size of the groups to calculate the std dev in the last block of the critic
-parser.add_argument('--latentSize', type=int, default=256)                 #Size of the latent vector
-parser.add_argument('--dLatentSize', type=int, default=256)                #Size of the disentangled (W) latent vector
-parser.add_argument('--mappingLayers',type=int,default=4)                  #Number of mapping layers
-parser.add_argument('--neuronsInMappingLayer',type=int,default=256)        #Number of neurons in each of the mapping layers 
-parser.add_argument('--normalizeLatents', action='store_true')             #Wether to normalize the latent vector (Z) before feeding it to the mapping network
-parser.add_argument('--resolution', type=int, nargs='?')                   #Final image resolution. If not specified, gets it from the first image in the training set
-parser.add_argument('--randomizeNose', action='store_true')                                              #Wether to randomize noise inputs every time
-parser.add_argument('--activationFunction', choices=['lrelu','relu','tanh','sigmoid'], default='lrelu')  #Which activation function to use for the whole network
-parser.add_argument('--outputChannels', type=int, default=3)
-parser.add_argument('--upsampleMode', type=str, default='bilinear')         #Algorithm to use for upsampling and downsampling tensors
-
-############################
-#  Resume training
-############################
-parser.add_argument('--resumeTraining', nargs='*')  #Resumes a previous training. The user must specify the current loop number (uses the weights file from --preWtsFile)
-
-##Parse and save configuration
-config, _ = parser.parse_known_args()
+cfg.logger.logPath = './exp1/'        #Folder were the training outputs are stored
+cfg.logger.logLevel = logging.INFO    #Use values from logging
+cfg.logger.saveModelEvery = 150.      #(Approx) Number of ticks shown before saving a checkpoint of the model
+cfg.logger.saveImageEvery = 20.       #(Approx) Number of ticks shown before generating a set of images and saving them in the log directory
+cfg.logger.logStep = 5.               #(Approx) Number of ticks shown before writing a log in the log directory
 
 ############################
 #  Decoder options
 ############################
-parser.add_argument('--decoderNetwork', choices=['revised','skip','resnet'], default='resnet')  #Network architecture for the decoder
+
+cfg.decoder = CN()
+
+cfg.decoder.network = 'resnet'  #Network architecture for the decoder

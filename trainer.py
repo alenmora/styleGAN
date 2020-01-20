@@ -1,234 +1,218 @@
-import torch.nn as nn 
 import torch 
+import torch.nn as nn 
 import numpy as np
+import argparse
 from torch.optim import Adam, lr_scheduler
+import torch.autograd as autograd
 from datetime import datetime
-from config import config 
-import utils
-from generatorNetwork import Generator
-from criticNetwork import Critic
-from dataLoader import DataLoader
-from logger import Logger
+from models.generatorNetwork import Generator
+from models.criticNetwork import Critic
+from misc.dataLoader import DataLoader
+from misc.logger import Logger
+from misc import utils
 import os
 import math
 import copy
 from random import random
 
-def nonSaturatingLossG_(fakeScores):
-    return -torch.log(fakeSkores).mean()
+def applyLossScaling(value):
+    return value*2**(value)
 
-def nonSaturatingLossC_(realScores, fakeScores):
-    return -torch.log(1-fakeSkores).mean()-log(realScores).mean()
+def undoLossScaling(value):
+    return value*2**(-value)
 
-def wassersteinLossG_(fakeScores):
-    return -fakeScores.mean()
-
-def wassersteinLossC_(realScores, fakeScores):
-    return fakeScores.mean()-realCores.mean()
-
-def gradientPenalization(gradient, obj):
-    return ((gradInterpols.norm(dim=1)-obj)**2).mean()/(obj+1e-8)**2
-
-def R1GradientPenalization(gradient): # arXiv 1801.04406
-    return 2*((gradInterpols.norm(dim=1))**2).mean()
-
-def driftLoss(realScores):
-    return (realScores**2).mean()
-
-def getLossFunctions(name):
-    if name == 'NSL':
-        return nonSaturatingLossC_, nonSaturatingLossG_
-    elif name == 'WGP':
-        return wassersteinLossC_, wassersteinLossG_
-
+def WassersteinLoss(value, truth):
+    return (value*truth.mul(-2).add(1)).mean()
 
 class Trainer:
     """
     Trainer class with hyperparams, log, train function etc.
     """
-    def __init__(self, config):
+    def __init__(self, opt):
+        lopt = opt.logger
+        topt = opt.trainer
+        mopt = opt.model
+        gopt = opt.model.gen
+        copt = opt.model.crit
+        goopt = opt.optim.gen
+        coopt = opt.optim.crit
+       
+        #logger
+        self.logger_ = Logger(self, gopt.latentSize, topt.resumeTraining, opt.tick, opt.loops, lopt.logPath, lopt.logStep, 
+                                lopt.saveImageEvery, lopt.saveModelEvery, lopt.logLevel)
+        self.logger = self.logger_.logger
 
         #CUDA configuration parameters
-        self.useCuda = torch.cuda.is_available()
-        if torch.cuda.is_available():
-            self.device = torch.device('cuda')
-            print('Using CUDA...')
+        if opt.device == 'cuda':
+            os.environ['CUDA_VISIBLE_DEVICES'] = opt.deviceId
+            num_gpus = len(opt.deviceId.split(','))
+            self.logger.info("Using {} GPUs.".format(num_gpus))
+            self.logger.info("Training on {}.\n".format(torch.cuda.get_device_name(0)))
+            torch.backends.cudnn.benchmark = True
+        self.device = torch.device(opt.device)
+        #data loader
+        dlopt = opt.dataLoader
+
+        self.dataLoader = DataLoader(dlopt.dataPath, dlopt.resolution, dlopt.noChannels, dlopt.batchSize, dlopt.numWorkers)
+        
+        self.resolution, self.nCh = self.dataLoader.resolution, self.dataLoader.nCh
+
+        # training opt
+        assert opt.tick > 0, self.logger.error(f'The number of ticks should be a positive integer, got {opt.tick} instead')
+        self.tick = float(opt.tick)
+
+        assert opt.loops > 0, self.logger.error(f'The number of ticks should be a positive integer, got {opt.loops} instead')
+        self.loops = int(opt.loops)
+
+        self.imShown = 0
+        self.batchShown = self.imShown // self.dataLoader.batchSize
+
+        assert topt.lossFunc in ['NSL','WD'], self.logger.error(f'The specified loss model is not supported. Please choose between "NSL" or "WD"')
+        self.lossFunc = topt.lossFunc
+        self.criterion = nn.BCEWithLogitsLoss() if self.lossFunc == 'NSL' else WassersteinLoss
+
+        self.applyLossScaling = bool(topt.applyLossScaling)
+
+        self.paterm = int(topt.paterm) if int(topt.paterm) in [0,1,2] else None
+        self.lambg = float(topt.lambg)
+        self.gLazyReg = max(topt.gLazyReg,1)
+        self.styleMixingProb = float(topt.styleMixingProb)
+
+        assert self.paterm is None or not self.styleMixingProb, self.logger.error('Trainer ERROR: The mixing styles regularization is not compatible with a pulling away term')
+
+        assert topt.nCritPerGen > 0, self.logger.error(f'Trainer ERROR: The number of critic training loops per generator loop should be an integer >= 1 (got {topt.nCritPerGen})')
+        self.nCritPerGen = int(topt.nCritPerGen)
+        
+        self.lambR2 = float(topt.lambR2) if topt.lambR2 else 0     #lambda R2
+        self.obj = float(topt.obj) if topt.obj else 1              #objective value (1-GP)
+
+        self.lambR1 = float(topt.lambR1) if topt.lambR2 else 0     #lambda R1
+        
+        self.epsilon = float(topt.epsilon) if topt.epsilon else 0  #epsilon (drift loss)
+
+        self.cLazyReg = max(topt.cLazyReg,1)
+
+        self.kUnroll = int(topt.unrollCritic) if topt.unrollCritic else 0
+        
+        assert self.kUnroll >= 0, self.logger.error(f'Trainer ERROR: The unroll parameter is less than zero ({self.kUnroll})')
+
+        #Common model parameters
+        common = {
+                    'fmapMax': mopt.fmapMax,
+                    'fmapMin': mopt.fmapMin,
+                    'fmapDecay': mopt.fmapDecay,
+                    'fmapBase': mopt.fmapBase,
+                    'activation': mopt.activation,
+                    'upsample': mopt.sampleMode,
+                    'downsample': mopt.sampleMode
+                }
+
+        #Generator model parameters
+        self.gen = Generator(**common, **gopt).to(self.device)
+        self.latentSize = self.gen.mapping.latentSize
+        assert not self.styleMixingProb or not gopt.returnLatents, self.logger.error('Trainer ERROR: It is not possible to return the latents while performing mixing regularization')       
+
+        self.logger.info(f'Generator constructed. Number of parameters {sum([np.prod([*p.size()]) for p in self.gen.parameters()])}')
+
+        #Critic model parameters
+        self.crit = Critic(**mopt, **copt).to(self.device)
+
+        self.logger.info(f'Critic constructed. Number of parameters {sum([np.prod([*p.size()]) for p in self.crit.parameters()])}')
+
+        #Generator optimizer parameters        
+        glr, beta1, beta2, epsilon, lrDecay, lrDecayEvery, lrWDecay = list(goopt.values())
+
+        assert lrDecay >= 0 and lrDecay <= 1, self.logger.error('Trainer ERROR: The decay constant for the learning rate of the generator must be a constant between [0, 1]')
+        assert lrWDecay >= 0 and lrWDecay <= 1, self.logger.error('Trainer ERROR: The weight decay constant for the generator must be a constant between [0, 1]')
+        self.gOptimizer = Adam(filter(lambda p: p.requires_grad, self.gen.parameters()), lr = glr, betas=(beta1, beta2), weight_decay=lrWDecay, eps=epsilon)
+
+        if lrDecayEvery and lrDecay:
+            self.glrScheduler = lr_scheduler.StepLR(self.gOptimizer, step_size=lrDecayEvery, gamma=lrDecay)
         else:
-            self.device = torch.device('cpu')
+            self.glrScheduler = None
+
+        self.logger.info(f'Generator optimizer constructed')
+
+        #Critic optimizer parameters
+        clr, beta1, beta2, epsilon, lrDecay, lrDecayEvery, lrWDecay = list(coopt.values())
+
+        assert lrDecay >= 0 and lrDecay <= 1, self.logger.error('Trainer ERROR: The decay constant for the learning rate of the critic must be a constant between [0, 1]')
+        assert lrWDecay >= 0 and lrWDecay <= 1, self.logger.error('Trainer ERROR: The weight decay constant for the critic must be a constant between [0, 1]')
         
-        #Config
-        self.config = config
+        self.cOptimizer = Adam(filter(lambda p: p.requires_grad, self.crit.parameters()), lr = clr, betas=(beta1, beta2), weight_decay=lrWDecay, eps=epsilon)
 
-        #data loading
-        self.dataLoader = dataLoader(config)
-        
-        # Hyperparams
-        self.nCritPerGen = int(config.nCritPerGen)
-        assert self.nCritPerGen > 0, f'Trainer ERROR: The number of critic training loops per generator loop should be an integer >= 1 (got {self.nCritPerGen})'
-        self.cLR=config.cLR; self.gLR=config.gLR
-        self.latentSize = int(config.latentSize)
-                
-        #Training parameters
-        self.nLoops = config.loops
-        self.tick = max(config.tick,1)
-        self.imgStable = math.ceil(self.tick*self.nLoops/(2*self.dataLoader.nres+1))
-        self.imgFading = math.ceil(self.tick*self.nLoops/(2*self.dataLoader.nres+1))
-        
-        self.reslvl = 0
-        self.resolution = 4
-        
-        self.imShown = 0.
-        self.imShownInRes = 0.
-        self.batchShown = 0
-
-        self.endResolution = config.resolution
-        self.fadeWt = 1.
-        self.kUnroll = 0
-        
-        if config.unrollCritic:
-            self.kUnroll = int(config.unrollCritic)
-        
-        assert self.kUnroll >= 0, f'Trainer ERROR: The unroll parameter is less than zero ({self.kUnroll})'
-
-        # Loss function of critic
-        self.lamb = config.lamb              #lambda 
-        self.obj = config.obj                #objective value (1-GP)
-        self.epsilon = config.epsilon        #epsilon (drift loss)
-
-        self.lossFunc = config.lossFunc
-        
-        self.critLoss, self.genLoss = getLossFunctions(self.lossFunc) 
-
-        self.lazyRegCritic = max(config.computeCRegTermsEvery,1)
-
-        #Loss function of generator
-        self.paterm = config.paterm
-        self.lambg = config.lambg
-        self.styleMixingProb = config.styleMixingProb
-
-        assert self.paterm == None or self.styleMixingProb == None, 'Trainer ERROR: The mixing styles regularization is not compatible with a pulling away term'
-        assert self.paterm == None or self.styleMixingProb == None, 'Trainer ERROR: The mixing styles regularization is not compatible with a pulling away term'
-        assert self.styleMixingProb == None or config.returnLatents == False, 'Trainer ERROR: It is not possible to return the latents while performing mixing regularization'
-
-        self.lazyRegGenerator = max(config.computeGRegTermsEvery,1)
-
-        # models
-        self.createModels()
-
-        # Optimizers
-        assert config.gLRDecay > 0 and config.gLRDecay <= 1, 'Trainer ERROR: The decay constant for the learning rate of the generator must be a constant between [0, 1]'
-        self.gLRDecay =config.gLRDecay
-
-        betas = config.gOptimizerBetas.split(' ')
-        beta1, beta2 = float(betas[0]), float(betas[1])
-        assert config.gLRWdecay >= 0 and config.gLRWdecay <= 1, 'Trainer ERROR: The weight decay constant for the generator must be a constant between [0, 1]'
-        self.gOptimizer = Adam(filter(lambda p: p.requires_grad, self.gen.parameters()), lr = self.gLR, betas=(beta1, beta2), weight_decay=config.gLRWdecay)
-
-        self.glrScheduler = lr_scheduler.LambdaLR(self.gOptimizer,lambda epoch: self.gLRDecay)
-
-        assert config.cLRDecay > 0 and config.cLRDecay <= 1, 'Trainer ERROR: The decay constant for the learning rate of the critic must be a constant between [0, 1]'
-        self.cLRWecay =config.cLRDecay
-
-        assert config.cLRWdecay >= 0 and config.cLRWdecay <= 1, 'Trainer ERROR: The weight decay constant for the critic must be a constant between [0, 1]'
-        betas = config.cOptimizerBetas.split(' ')
-        beta1, beta2 = float(betas[0]), float(betas[1])
-        self.cOptimizer = Adam(filter(lambda p: p.requires_grad, self.crit.parameters()), lr = self.cLR, betas=(beta1, beta2), weight_decay=config.cLRWdecay)
-
-        self.clrScheduler = lr_scheduler.LambdaLR(self.cOptimizer,lambda epoch: self.cLRDecay)
-                
-        # Paths        
-        self.preWtsFile = config.preWtsFile
-        
-        if config.resumeTraining:
-            self.resumeTraining(config)
-        
-        elif self.preWtsFile: self.loadPretrainedWts()
-        
-        #Log
-        self.logger = logger(self, config)
-        self.logger.logArchitecture()
-
-        print(f'The trainer has been instantiated.... Starting step: {self.nTicks}. Start resolution: {self.res}. Final resolution: {self.endRes}')
-        
-    def resumeTraining(self, config):
-        """
-        Resumes the model training, if a valid pretrained weights file is given, and the 
-        starting resolution and number of images shown for the current resolution are correctly
-        specified
-        """
-        if not self.loadPretrainedWts():
-            print('Could not load weights for the pretrained model. Starting from zero...')
-            return
-
-        res, imShownInRes = config.resumeTraining
-        res, imShownInRes = int(res), int(imShownInRes)
-        curResLevel = 0
-            
-        curResLevel = int(np.log2(res)-2)
-        
-        if 2**(curResLevel+2) != res or res > 1024 or res < 4:
-            print(f'Trainer ERROR: the current resolution ({res}) is not a power of 2 between 4 and 1024. Proceeding from zero...')
-            return
- 
-        if curResLevel > 0 and imShownInRes < self.imgFading:
-            print(f'Trainer ERROR: the training resuming can only proceed from stable phases. However, the number of images already shown ({imShownInRes}) '
-                  f'is less than the number of images shown in the fading stage ({self.imgFading}). Proceeding from zero...')
-
+        if lrDecayEvery and lrDecay:
+            self.clrScheduler = lr_scheduler.StepLR(self.gOptimizer, step_size=lrDecayEvery, gamma=lrDecay)
         else:
-            if curResLevel > 0:
-                if imShownInRes > self.imgFading+self.imgStable:
-                    print(f'Trainer ERROR: the number of images already shown ({imShownInRes}) is higher than the number of images shown for one resolution '
-                          f'level ({self.imgFading+self.imgStable})! Proceeding from zero...')
-                else:
-                    self.imShown = curResLevel*(self.imgFading+self.imgStable) + imShownInRes
-                    self.imShownInRes = imShownInRes
-                    self.resolution = res
-                    self.reslvl = int(curResLevel)+1
-                    self.dataLoader.renewData(self.reslvl)
-                    for i in range(curResLevel):
-                        self.clrScheduler.step()
-                        self.glrScheduler.step()
-            else:
-                if imShownInRes > self.imgStable:
-                    print(f'Trainer ERROR: the number of images already shown ({imShownInRes}) is higher than the number of images shown for the first ' 
-                          f'resolution ({self.imgStable})! Proceeding from zero...')
-                else:
-                    self.imShown = imShownInRes
-                    self.imShownInRes = imShownInRes
-                    self.resolution = res
-                    self.reslvl = int(curResLevel)+1
-                    self.dataLoader.renewData(self.reslvl)
+            self.clrScheduler = None
+
+        self.logger.info(f'Critic optimizer constructed')
+        
+        self.preWtsFile = opt.preWtsFile
+        self.resumeTraining = bool(topt.resumeTraining)
+        self.loadPretrainedWts(resumeTraining = self.resumeTraining)
+
+        self.logger.info(f'The trainer has been instantiated.... Starting step: {self.imShown}. Resolution: {self.resolution}')
+
+        self.logArchitecture(clr,glr)
+
+    def logArchitecture(self, clr, glr):
+        """
+        This function will print hyperparameters and architecture and save the in the log directory under the architecture.txt file
+        """
+        
+        cstFcn = f'Cost function model: {self.lossFunc}\n'
+        
+        hyperParams = (f'HYPERPARAMETERS - res = {self.resolution}|bs = {self.dataLoader.batchSize}|cLR = {clr}|gLR = {glr}|lambdaR2 = {self.lambR2}|'
+                      f'obj = {self.obj}|lambdaR1 = {self.lambR1}|epsilon = {self.epsilon}|{self.loops} loops, showing {self.tick} images per loop'
+                      f'|Using pulling away regularization? {f"Yes, with value {self.paterm}" if self.paterm is not None else "No"}')
+        
+        architecture = '\n' + str(self.crit) + '\n\n' + str(self.gen) + '\n\n'
+        
+        self.logger.info(cstFcn+hyperParams)
+
+        f = os.path.join(self.logger_.logPath, self.logger_.archFile)
+
+        self.logger.debug(architecture)
+
+        utils.writeFile(f, cstFcn+hyperParams+architecture, 'w')
                         
-    def createModels(self):
-        """
-        This function will create models and their optimizers
-        """
-        self.gen = Generator(self.config).to(self.device)
-        self.crit = Critic(self.config).to(self.device)
-        
-        print('Models Instantiated. # of trainable parameters Critic: %e; Generator: %e' 
-              %(sum([np.prod([*p.size()]) for p in self.crit.parameters()]), 
-                sum([np.prod([*p.size()]) for p in self.gen.parameters()])))
-        
-    def loadPretrainedWts(self):
+    def loadPretrainedWts(self, resumeTraining = False):
         """
         Search for weight file in the experiment directory, and loads it if found
         """
         dir = self.preWtsFile
         if os.path.isfile(dir):
             try:
-                wtsDict = torch.load(dir, map_location=lambda storage, loc: storage)
-                self.crit.load_state_dict(wtsDict['crit']) 
-                self.gen.load_state_dict(wtsDict['gen'])
-                self.cOptimizer.load_state_dict(wtsDict['cOptimizer'])
-                self.gOptimizer.load_state_dict(wtsDict['gOptimizer'])
-                print(f'Loaded pre-trained weights from {dir}')
+                stateDict = torch.load(dir, map_location=lambda storage, loc: storage)
+                self.crit.load_state_dict(stateDict['crit']) 
+                self.gen.load_state_dict(stateDict['gen'], strict=False) #Since the cached noise buffers are initialized at None
+                self.logger.debug(f'Loaded pre-trained weights from {dir}')
+                
+                if resumeTraining:
+                    self.imShown = stateDict['imShown']
+                    self.loops = stateDict['loops']
+                    self.tick = stateDict['tick']
+                    self.Logger_.genLoss = stateDict['genLoss']
+                    self.Logger_.criticLoss = stateDict['criticLoss']
+                    self.Logger_.criticLossReals = stateDict['criticLossReals']
+                    self.Logger_.criticLossFakes = stateDict['criticLossFakes']
+                    self.Logger_.logCounter = stateDict['logCounter']
+                    self.Logger_.ncAppended = stateDict['ncAppended']
+                    self.Logger_.ngAppended = stateDict['ngAppended']
+                    self.Logger_.snapCounter = stateDict['snapCounter']
+                    self.Logger_.imgCounter = stateDict['imgCounter']
+                    self.cOptimizer.load_state_dict(stateDict['cOptimizer'])
+                    self.gOptimizer.load_state_dict(stateDict['gOptimizer'])
+                    self.batchShown = stateDict['batchShown']
+                    self.logger.debug(f'And the optimizers states as well')
+                
                 return True
             except:
-                print(f'ERROR: The weights in {dir} could not be loaded. Proceding from zero...')
+                self.logger.error(f'ERROR: The weights in {dir} could not be loaded. Proceding from zero...')
                 return False
         else:
-            print(f'ERROR: The file {dir} does not exist. Proceding from zero...')    
+            self.logger.error(f'ERROR: The file {dir} does not exist. Proceding from zero...')    
         
         return False
 
@@ -242,15 +226,21 @@ class Trainer:
         """
         Returns n fake images and their latent vectors
         """ 
-        if n == None: n = self.dataLoader.batchSize
+        if n is None: n = self.dataLoader.batchSize
+        
         z = utils.getNoise(bs = n, latentSize = self.latentSize, device = self.device)
-
-        if random() < self.styleMixingProb:
+        
+        if self.styleMixingProb and random() < self.styleMixingProb:
             zmix = utils.getNoise(bs = n, latentSize = self.latentSize, device = self.device)
-            return self.gen(z, zmix = z2, maxLayer = self.reslvl, fadeWt = self.fadeWt)
+            zmix = (zmix - zmix.mean(dim=1, keepdim=True))/(zmix.std(dim=1, keepdim=True)+1e-8)
+            return [self.gen(z, zmix = zmix), z]
+        
+        output = self.gen(z)
 
-
-        return *self.gen(z, maxLayer = self.reslvl, fadeWt=self.fadeWt), z
+        if isinstance(output, list):
+            return [*output, z]
+        else:
+            return [output, z]
 
     def getBatchReals(self):
         """
@@ -264,6 +254,44 @@ class Trainer:
         """
         return self.getFakes()
     
+    def R2GradientPenalization(self, reals, fakes):
+        alpha = torch.rand(reals.size(0), 1, 1, 1, device=reals.device)
+        interpols = (alpha*reals + (1-alpha)*fakes).detach().requires_grad_(True)
+        cOut = self.crit(interpols)
+        
+        if self.applyLossScaling:
+            cOut = applyLossScaling(cOut)
+
+        ddx = autograd.grad(outputs=cOut, inputs=interpols,
+                              grad_outputs = torch.ones_like(cOut,device=self.device),
+                              create_graph = True, retain_graph=True, only_inputs=True)[0]
+
+        ddx = ddx.view(ddx.size(0), -1)
+
+        if self.applyLossScaling:
+            ddx = undoLossScaling(ddx)
+            
+        return ((ddx.norm(dim=1)-self.obj)**2).mean()/(self.obj+1e-8)**2
+
+    def R1GradientPenalization(self, reals):
+        reals = reals.clone().requires_grad_(True)
+        cOut = self.crit(reals)
+
+        if self.applyLossScaling:
+            cOut = applyLossScaling(cOut)
+
+        ddx = autograd.grad(outputs=cOut, inputs=reals,
+                              grad_outputs = torch.ones_like(cOut,device=self.device),
+                              create_graph = True, retain_graph=True, only_inputs=True)[0]
+
+        ddx = ddx.view(ddx.size(0), -1)
+
+        if self.applyLossScaling:
+            ddx = undoLossScaling(ddx)
+
+        return 0.5*(ddx.norm(dim=1)**2).mean()
+
+    
     def trainCritic(self):
         """
         Train the critic for one step and store outputs in logger
@@ -272,32 +300,29 @@ class Trainer:
         utils.switchTrainable(self.crit, True)
         utils.switchTrainable(self.gen, False)
 
-        maxLayer = 2*self.reslvl+1
-
         # real
-        real = self.dataLoader.get_batch()
-        cRealOut = self.crit(x=real, maxLayer = maxLayer, fadeWt=self.fadeWt)
+        real = self.dataLoader.get_batch().to(self.device)
+        cRealOut = self.crit(x=real)
         
         # fake
         fake, *_ = self.getBatchFakes()
-        cFakeOut = self.crit(x=fake.detach(), maxLayer = maxLayer, fadeWt=self.fadeWt)
+        cFakeOut = self.crit(x=fake.detach())
         
-        loss = self.critLoss(cRealOut, cFakeOut)
-        
-        if self.lossFunc == 'WGP' and self.batchShown % self.lazyRegCritic == self.lazyRegCritic-1:
-            alpha = torch.rand(real.size(0), 1, 1, 1, device=self.device)
-            interpols = (alpha*real + (1-alpha)*fake).detach().requires_grad_(True)
-            gradInterpols = self.crit.getGradientsWrtInputs(interpols, maxLayer = maxLayer, fadeWt=self.fadeWt)
-            loss += self.lamb*gradientPenalization(gradInterpols,self.obj)
-            loss += self.epsilon*driftLoss(cRealOut)
+        lossReals = self.criterion(cRealOut, torch.ones_like(cRealOut, device=self.device))
+        lossFakes = self.criterion(cFakeOut, torch.zeros_like(cFakeOut, device=self.device))
 
-        elif self.lossFunc == 'NSL' and self.batchShown % self.lazyRegCritic == self.lazyRegCritic-1:
-            grads = self.crit.getGradientsWrtInputs(real, maxLayer = maxLayer, fadeWt=self.fadeWt) 
-            loss += self.lamb*R1GradientPenalization(grads)
+        loss = lossReals+lossFakes
+        
+        if self.batchShown % self.cLazyReg == self.cLazyReg-1:
+            if self.lambR2: loss += self.lambR2*self.R2GradientPenalization(real, fake)
+            if self.epsilon: loss += self.epsilon*(cRealOut**2).mean()
+            if self.lambR1: loss += self.lambR1*self.R1GradientPenalization(real)
 
         loss.backward(); self.cOptimizer.step()
+        
+        if self.clrScheduler is not None: self.clrScheduler.step() #Reduce learning rate
 
-        self.logger.appendCLoss(loss)
+        self.logger_.appendCLoss(loss, lossReals, lossFakes)
         
     def trainGenerator(self):
         """
@@ -306,21 +331,21 @@ class Trainer:
         self.gOptimizer.zero_grad()
         utils.switchTrainable(self.gen, True)
         utils.switchTrainable(self.crit, False)
-
-        maxLayer = 2*self.reslvl+1
         
         fake, *latents = self.getBatchFakes()
-        cFakeOut = self.crit(x=fake, fadeWt=self.fadeWt, maxLayer = maxLayer)
-        
-        loss = self.genLoss(cFakeOut)
+        cFakeOut = self.crit(fake)
 
-        if self.paterm != None and self.batchShown % self.lazyRegGenerator == self.lazyRegGenerator-1:
+        loss = self.criterion(cFakeOut, torch.ones_like(cFakeOut, device=self.device))
+
+        if self.paterm is not None and self.batchShown % self.gLazyReg == self.gLazyReg-1:
             latent = latents[0]
-            loss += self.lambg*self.gen.paTerm(latent, againstInput = self.paterm, maxLayer = maxLayer, fadeWt = self.fadeWt)
+            loss += self.lambg*self.gen.paTerm(latent, againstInput = self.paterm)
         
-        loss.backward(); self.gOptimizer.step()
+        loss.backward(); self.gOptimizer.step() 
         
-        self.logger.appendGLoss(loss)
+        if self.glrScheduler is not None: self.glrScheduler.step() #Reduce learning rate
+                
+        self.logger_.appendGLoss(loss)
 
         return fake.size(0)
 
@@ -329,63 +354,45 @@ class Trainer:
         Main train loop
         """ 
 
-        print('Starting training...')   
-        self.logger.startLogging() #Start the logging
+        self.logger.info('Starting training...')   
+        self.logger_.startLogging() #Start the  logger
 
-        # Loop over the first resolution, which only has stable stage. Since each batch shows batchSize images, 
-        # we need only samplesWhileStable/batchSize loops to show the required number of images
-        if self.reslvl == 0:
-            self.stage = 'stable'
-            while self.imShownInRes < self.imgStable:
-                self.doOneTrainingStep() #Increases self.imShownInRes and self.imShown
-                
-            self.imShownInRes = 0 #Reset the number of images shown at the end (to allow for training resuming)
-
-        # loop over resolutions 8 x 8 and higher
-        while self.imShown < self.tick*self.nLoops:   
-            self.fadeWt = min(float(self.imShownInRes)/self.imgFading, 1)
-            self.stage = 'fade' if self.fadeWt < 1 else 'stable'
-
-            if self.fadeWt == 0: #We just began to fade. So we need to increase the resolutions
-                self.clr_scheduler.step() #Reduce learning rate
-                self.glr_scheduler.step() #Reduce learning rate
-
-                self.reslvl = self.reslvl+1
-                self.resolution = int(self.dataLoader.renewData(self.reslvl))
-                
-            self.doOneTrainingStep() #Increases self.imShownInRes and self.imShown
-
-            if self.imShownInRes > self.imgStable+self.imgFading:
-                self.imShownInRes = 0 #Reset the number of images shown at the end (to allow for training resuming) 
-
-        self.logger.saveSnapshot(f'{self.res}x{self.res}_final_{self.latentSize}')
-            
-    def doOneTrainingStep(self):
-        """
-        Performs one train step for the generator, and nCritPerGen steps for the critic
-        """ 
-        if self.kUnroll:
-            for i in range(self.nCritPerGen):
-                self.trainCritic()
-                if i == 0:
-                    self.cBackup = copy.deepcopy(self.crit)
-        else:                
-            for i in range(self.nCritPerGen):
-                self.trainCritic()
+        # loop over images
+        while self.imShown < self.tick*self.loops:     
+            if self.kUnroll:
+                for i in range(self.nCritPerGen):
+                    self.trainCritic()
+                    if i == 0:
+                        self.cBackup = copy.deepcopy(self.crit)
+            else:                
+                for i in range(self.nCritPerGen):
+                    self.trainCritic()
         
-        shown = self.trainGenerator() #Use the generator training batches to count for the images shown, not the critic
+            shown = self.trainGenerator() #Use the generator training batches to count for the images shown, not the critic
         
-        if self.kUnroll:
-            self.crit.load(self.cBackup)
+            if self.kUnroll:
+                self.crit.load(self.cBackup)
 
-        self.imShown = self.imShown + int(shown) 
-        self.imShownInRes = self.imShownInRes + int(shown)
-        self.batchShown = self.batchShown + 1
+            self.imShown = self.imShown + int(shown) 
+            self.batchShown = self.batchShown + 1
 
-        if self.batchShown > max(self.lazyRegGenerator, self.lazyRegCritic):
-            self.batchShown = 0
+            if self.batchShown > max(self.gLazyReg, self.cLazyReg):
+                self.batchShown = 0
+
+        self.logger_.saveSnapshot(f'{self.resolution}x{self.resolution}_final_{self.latentSize}')    
 
 if __name__ == "__main__":
-    torch.backends.cudnn.benchmark = True           # boost speed.
-    Trainer = Trainer(config)
+    parser = argparse.ArgumentParser(description="StyleGAN pytorch implementation.")
+    parser.add_argument('--config', nargs='?', type=str)
+    
+    args = parser.parse_args()
+
+    from config import cfg as opt
+    
+    if args.config:
+        opt.merge_from_file(args.config)
+    
+    opt.freeze()
+    
+    Trainer = Trainer(opt)
     Trainer.train()

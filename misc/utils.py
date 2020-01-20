@@ -8,7 +8,7 @@ import torchvision.utils as vutils
 from torch import FloatTensor as FT
 from datetime import datetime
 import math
-import PIL.Image
+import PIL.Image as Image
 import animeface
 from shutil import copyfile
 
@@ -89,7 +89,6 @@ def saveImage(tensor, filename, nrow=8, padding=2, pad_value=0):
             saves the tensor as a grid of images by calling ``make_grid``.
         **kwargs: Other arguments are documented in ``make_grid``.
     """
-    from PIL import Image
     tensor = tensor.cpu()
     grid = makeImagesGrid(tensor, nrow=nrow, padding=padding, pad_value=pad_value)
     ndarr = grid.mul(255).clamp(0, 255).byte().permute(1, 2, 0).numpy()
@@ -124,7 +123,7 @@ def cleanImagesFolder(curPath, newPath, res = None, searchFaces = False, faceThr
 
     for image in images:
         try:
-            im = PIL.Image.open(image)
+            im = Image.open(image)
             if res != None:
                 if min(im.size) < res: continue
             if searchFaces:

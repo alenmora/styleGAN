@@ -4,35 +4,12 @@ import numpy as np
 from torch.nn import functional as F
 from commonBlocks import Linear, Conv2D, ModulatedConv2D, getActivation
 
-class MiniBatchStdDevLayer(nn.Module):
+class Decoder(nn.Module):
     """
-    Add std to last layer group of critic to improve variance
-    """
-    def __init__(self, groupSize = 4):
-        super().__init__()
-        self.groupSize = groupSize
-
-    def forward(self, x):
-        shape = list(x.size())                                              # NCHW - Initial size
-        xStd = x.view(self.groupSize, -1, shape[1], shape[2], shape[3])     # GMCHW - split minbatch into M groups of size G (= groupSize)
-        xStd -= torch.mean(xStd, dim=0, keepdim=True)                       # GMCHW - Subract mean over groups
-        xStd = torch.mean(xStd ** 2, dim=0, keepdim=False)                  # MCHW - Calculate variance over groups
-        xStd = (xStd + 1e-08) ** 0.5                                        # MCHW - Calculate std dev over groups
-        xStd = torch.mean(xStd.view(xStd.shape[0], -1), dim=1, keepdim=True).view(-1, 1, 1, 1)
-                                                                            # M111 - Take mean over CHW
-        xStd = xStd.repeat(self.groupSize, 1, shape[2], shape[3])           # N1HW - Expand to same shape as x with one channel 
-        output = torch.cat([x, xStd], 1)
-        return output
-    
-    def __repr__(self):
-        return self.__class__.__name__ + '(Group Size = %s)' % (self.groupSize)
-
-class Critic(nn.Module):
-    """
-    StyleGAN2 critics
+    Decoder for style transfer
     """    
     super().__init__()
-    def __init__(self, config, asRanker = False):
+    def __init__(self, config):
         self.nChannels = config.nChannels
         self.resolution = config.resolution
         self.fmapBase = config.fmapBase
@@ -42,14 +19,13 @@ class Critic(nn.Module):
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         self.scaleWeights = config.scaleWeights
         self.inCh = config.outputChannels
-        self.stdGroupSize = config.stdDevGroup
         self.downsample = config.upsampleMode
-        assert config.criticNetwork in ['revised','skip','resnet'], f'Critic ERROR: Invalid synthesis network architecture {config.criticNetwork}'
-        self.mode = config.criticNetwork
-        self.asRanker = asRanker
+        assert config.decoderNetwork in ['revised','skip','resnet'], f'Decoder ERROR: Invalid synthesis network architecture {config.decoderNetwork}'
+        self.mode = config.decoderNetwork
+        self.latentSize = config.latentSize
         
         rlog2 = int(np.log2(self.resolution))
-        assert self.resolution == 2**(relog2) and self.resolution >= 4, 'Critic ERROR: The resolution should be a power of 2 greater than 4'
+        assert self.resolution == 2**(relog2) and self.resolution >= 4, 'Decoder ERROR: The resolution should be a power of 2 greater than 4'
 
         def nf(stage): #Get the number of channels per layer
             return np.clip(int(self.fmapBase / (2.0 ** (stage * self.fmapDecay))), self.fmapMin, self.fmapMax)
@@ -91,16 +67,14 @@ class Critic(nn.Module):
                                     self.activation,
                                 ))
 
-        if self.stdGroupSize > 1:
-            self.miniBatchLayer = MiniBatchStdDevLayer(self.stdGroupSize)
 
         inCh = nf(0) if self.stdGroupSize <= 1 else nf(0)+1
-        self.fullyConnected = Linear(inCh=nf(0),outCh=1,scaleWeights=self.scaleWeights)
+        self.fullyConnected = Linear(inCh=nf(0),outCh=self.latentSize,scaleWeights=self.scaleWeights)
 
     def forward(self, x, *args, **kwargs):
         """
         Forward function.
-        x (tentsor): the input
+        x (tensor): the input image
         *args, **kwargs: extra arguments for the forward step in the pogressive growing configuration
         """
         if self.mode == 'revised':
@@ -119,13 +93,7 @@ class Critic(nn.Module):
         """
         x = self.convs[layer](x)
         return self.activation(x)
-
-    def applyLastLayer(self, x):
-        if self.stdGroupSize > 1 and not self.asRanker:
-            x = self.miniBatchLayer(x)
-
-        return self.fullyConnected(x)
-           
+       
     def forwardProgressive_(self, x, maxLayer = None, fadeWt = 1.):
         """
         Perform a forward pass using
@@ -134,8 +102,8 @@ class Critic(nn.Module):
         if maxLayer == None:
             maxLayer = len(self.convs)-1
 
-        assert maxLayer % 2 == 0, f'Critic ERROR: the layer ID in the forward call must be an even integer ({layerID})'
-        assert maxLayer < len(self.convs), f'Critic ERROR: the layer ID {maxLayer} is out of bounds {len(self.convs)}'
+        assert maxLayer % 2 == 0, f'Synthesis Module ERROR: the layer ID in the forward call must be an even integer ({layerID})'
+        assert maxLayer < len(self.convs), f'Synthesis Module ERROR: the layer ID {maxLayer} is out of bounds {len(self.convs)}'
         
         if fadeWt < 1:   #We are in a fade stage
             prev_x = F.interpolate(x, scale_factor=0.5, mode=self.downsample) #Downscale the image
@@ -151,10 +119,6 @@ class Critic(nn.Module):
                     x = F.interpolate(x,scale_factor=0.5,mode=self.downsample)
                     prev_x = F.interpolate(prev_x,scale_factor=0.5,mode=self.downsample)
 
-            if self.stdGroupSize > 1 and not self.asRanker:
-                x = self.miniBatchLayer(x)
-                prev_x = self.miniBatchLayer(x)
-
             x = fadeWt*x + (1-fadeWt)*prev_x 
 
         else:
@@ -163,9 +127,6 @@ class Critic(nn.Module):
                 x = self.applyOneLayer[layer](x)
                 if layer % 2:
                     x = F.interpolate(x,scale_factor=0.5,mode=self.downsample)
-
-            if self.stdGroupSize > 1 and not self.asRanker:
-                x = self.miniBatchLayer(x)
 
         x = self.fullyConnected(x)
         
@@ -187,7 +148,7 @@ class Critic(nn.Module):
                 t = F.interpolate(t, scale_factor=0.5, mode=self.downsample)
                 x = F.interpolate(x, scale_factor=0.5, mode=self.downsample)
 
-        t = self.applyLastLayer(t)
+        t = self.fullyConnected(t)
         
         return t
 
@@ -211,21 +172,6 @@ class Critic(nn.Module):
                 carryover = self.lp[layer//2](carryover)
                 carryover = F.interpolate(carryover, scale_factor=0.5, mode=self.downsample)
 
-        x = self.applyLastLayer(x)
+        x = self.fullyConnected(x)
 
         return x
-
-    def getGradientsWrtInputs(self, imp, *args, **kwargs):
-        """
-        Return the unrolled gradient matrix of the critic output wrt the input parameters for 
-        each example in the input
-        (should have the size batchSize x (imageChannels x imageWidth x imageHeight))
-        """
-        x = imp.detach().requires_grad_()
-        out = self.forward(x, *args, **kwargs)
-        ddx = autograd.grad(outputs=out, inputs=x,
-                              grad_outputs = torch.ones(out.size(),device=device),
-                              create_graph = True, retain_graph=True, only_inputs=True)[0]
-        ddx = ddx.view(ddx.size(0), -1)
-
-        return ddx

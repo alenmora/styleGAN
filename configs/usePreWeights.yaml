@@ -1,0 +1,12 @@
+trainer:
+  resumeTraining: False
+  lossFunc: 'WD'
+  lambR2: 10.
+  lambR1: 0.
+  paterm: 1
+  lambg: 50.  
+  styleMixingProb: 0.
+logger:
+  logPath: './exp2/'
+preWtsFile: '/home/amora/styleGAN/exp1/modelCheckpoint_40008_256.pth.tar'
+

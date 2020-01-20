@@ -3,37 +3,49 @@ import numpy as np
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader as torchDataLoader
 from torchvision.datasets import ImageFolder
-from PIL import Image
 import os
 from glob import glob
+import logging
+from PIL import Image
+
 import math
 
 class DataLoader:
-    def __init__(self, config):
-        self.dataPath = config.dataPath
-        if config.resolution:
-            assert config.resolution >= 4, 'dataLoader ERROR: The output resolution must be bigger than or equal to 4x4'
-            self.endResolution = config.resolution
+    def __init__(self, dataPath = './data/', resolution = None, nCh = None, batchSize = 24, numWorkers = 0):
+        self.dataPath = dataPath
+
+        self.ims = glob(os.path.join(self.dataPath,'/*/*.jpg'))
+        self.ims += glob(os.path.join(self.dataPath,'/*/*.png'))
+        self.ims += glob(os.path.join(self.dataPath,'/*/*.jpeg'))
+
+        assert len(self.ims) > 0, logging.error("dataLoader ERROR: No images found in the given folder")
+
+        if resolution and nCh:
+            assert resolution >= 4, logging.error("dataLoader ERROR: The output resolution must be bigger than or equal to 4x4")
+            self.resolution = int(resolution)
+
+            assert nCh >= 1, logging.error("dataLoader ERROR: The number of channels must be a positive integer")
+            self.nCh = nCh
         else: #deduce resolution from first image in data folder
-            ims = glob(os.path.join(self.dataPath,'*/*.jpg'))
-            ims += glob(os.path.join(self.dataPath,'*/*.png'))
-            ims += glob(os.path.join(self.dataPath,'*/*.jpeg'))
-            self.endResolution = min(Image.open(ims[0]).size())
+            firstImg = Image.open(self.ims[0])
+            self.resolution = min(firstImg.size)
+            self.nCh = len(firstImg.getbands())
 
-        self.batchSizes = {4:28, 8:28, 16:24, 32:20, 64:16, 128:12, 256:8, 512:6, 1024:4}
-        self.resolution = 4
-        self.reslevel = 0
-        self.resolutions = 2**np.linspace(np.log2(self.resolution, self.endResolution), endpoint=True)
-        self.nres = len(self.resolutions)
+        if self.resolution != 2**(int(np.log2(resolution))):
+            trueres = 4
+            while self.resolution//(trueres*2) != 0:
+                trueres = trueres*2
 
-        self.num_workers = 0
+            self.resolution = trueres
+            
+        self.numWorkers = numWorkers
+
+        self.batchSize = batchSize
         
-        self.renewData(self.resolution)
+        self.loadData()
 
-    def renewData(self, reslvl):
-        print(f'[*] Renew dataloader configuration, load data from {self.dataPath} with resolution {resl}x{resl}')
-        self.resolution = int(self.resolutions[reslvl])
-        self.batchSize = self.batchSizes[self.resolution]
+    def loadData(self):
+        logging.info(f'Loading data from {self.dataPath} with resolution {self.resolution}x{self.resolution}')
         self.dataset = ImageFolder(
                                     root=self.dataPath,
                                     transform=transforms.Compose([
@@ -46,12 +58,10 @@ class DataLoader:
             dataset=self.dataset,
             batch_size=self.batchSize,
             shuffle=True,
-            num_workers=self.num_workers,
+            num_workers=self.numWorkers,
             drop_last=True,
             pin_memory = torch.cuda.is_available()
         )
-
-        return self.resolution
 
     def __iter__(self):
         return iter(self.dataloader)
@@ -67,7 +77,7 @@ class DataLoader:
         return next(dataIter)[0].mul(2).add(-1)     # pixel range [-1, 1]
         
     def get(self, n = None):
-        if n == None: n = self.batchSize
+        if n is None: n = self.batchSize
 
         x = self.get_batch()
         for i in range(n // self.batchSize):
