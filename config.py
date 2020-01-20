@@ -87,7 +87,6 @@ cfg.model.gen.mappingLayers = 4              #Number of mapping layers
 cfg.model.gen.neuronsInMappingLayers = 256   #Number of neurons in each of the mapping layers 
 cfg.model.gen.randomizeNoise = False         #Wether to randomize noise inputs every time
 cfg.model.gen.scaleWeights = False           #Wether to scale the weights for equalized learning
-cfg.model.gen.returnLatents = False          #Wether to store the disentangled latents (w) together with the output image
 
 cfg.optim = CN()
 ############################
@@ -144,6 +143,24 @@ cfg.logger.logStep = 5.               #(Approx) Number of ticks shown before wri
 #  Decoder options
 ############################
 
-cfg.decoder = CN()
+cfg.dec = CN()
 
-cfg.decoder.network = 'resnet'  #Network architecture for the decoder
+cfg.dec.network = 'resnet'       #Network architecture for the decoder
+cfg.dec.wtsFile = ''             #Trained weights
+cfg.dec.useCriticWeights = True  #Initialize as many parameters of the decoder as possible using the critic trained weights
+cfg.dec.resumeTraining = False   #Initialize as many parameters of the decoder as possible using the critic trained weights
+cfg.dec.batchSize = 40           #Initialize as many parameters of the decoder as possible using the critic trained weights
+
+############################
+#  Decoder optimizer Options
+############################
+
+cfg.optim.dec = CN()
+
+cfg.optim.dec.lr = 0.003
+cfg.optim.dec.beta1 = 0.
+cfg.optim.dec.beta2 = 0.99
+cfg.optim.dec.eps = 1e-8
+cfg.optim.dec.lrDecay =0.1                #Critic learning rate decay constant 
+cfg.optim.dec.lrDecayEvery = 2000         #(Approx) Number of ticks shown before applying the decay to the critic learning rate
+cfg.optim.dec.lrWDecay = 0.               #Critic weight decay constant

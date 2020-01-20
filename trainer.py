@@ -382,7 +382,7 @@ class Trainer:
         self.logger_.saveSnapshot(f'{self.resolution}x{self.resolution}_final_{self.latentSize}')    
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="StyleGAN pytorch implementation.")
+    parser = argparse.ArgumentParser(description="StyleGAN2 pytorch implementation.")
     parser.add_argument('--config', nargs='?', type=str)
     
     args = parser.parse_args()
