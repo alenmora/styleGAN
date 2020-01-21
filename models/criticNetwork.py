@@ -57,7 +57,7 @@ class Critic(nn.Module):
         self.nLayers = 2*(rlog2-1)-1 #4x4 requires 1 (conv) layer, 8x8 requires 3, 16x16 requires 5,...
 
         self.convs = nn.ModuleList() #Keeps the 2D convolutional modules
-        self.fromRGB = nn.ModuleList() #Keeps the toRGB modules
+        self.fromRGB = nn.ModuleList() #Keeps the FromRGB modules
         self.lp = nn.ModuleList()    #Keeps the 2DConv modules for linear projection when performing resnet architecture
 
         def layer(kernel, layerId): #Constructor of layers
@@ -66,21 +66,18 @@ class Critic(nn.Module):
             outCh = nf(stage)
 
             if not layerId % 2: #Even layer
-                if self.mode != 'resnet': #add the fromRGB module for the given resolution
+                if self.mode == 'skip': #add the fromRGB module for the given resolution
                     self.fromRGB.append(nn.Sequential(
                                             Conv2D(inCh=self.inCh, outCh=inCh, kernelSize=1, scaleWeights=self.scaleWeights),
                                             self.activation,
                                         ))
                 
-                else: #Add the convolution modules for properly matching the channels during the residual connection
+                elif self.mode == 'resnet': #Add the convolution modules for properly matching the channels during the residual connection
                     if layerId > 0: # (the first layer does not require this module)
-                        self.lp.append(Conv2D(inCh=inCh, outCh=outCh,kernelSize=kernel))
+                        self.lp.append(Conv2D(inCh=inCh, outCh=outCh, kernelSize=1))
 
             #Add the required convolutional module
-            if layerId == 0:
-                self.convs.append(Conv2D(inCh=inCh, outCh=outCh, kernelSize=4, padding=0))
-            else:
-                self.convs.append(Conv2D(inCh=inCh, outCh=outCh, kernelSize=kernel))
+            self.convs.append(Conv2D(inCh=inCh, outCh=outCh, kernelSize=kernel))
         
         for layerId in range(self.nLayers): #Create the layers from to self.nLayers-1
             layer(kernel=3, layerId=layerId)  
@@ -95,7 +92,9 @@ class Critic(nn.Module):
             self.miniBatchLayer = MiniBatchStdDevLayer(self.stdGroupSize)
 
         inCh = nf(0) if self.stdGroupSize <= 1 else nf(0)+1
-        self.fullyConnected = Linear(inCh=inCh,outCh=1,scaleWeights=self.scaleWeights)
+        self.fullyConnected = nn.Sequential(Linear(inCh=inCh*4*4, outCh=nf(0), scaleWeights=self.scaleWeights),
+                                            self.activation, 
+                                            Linear(inCh=nf(0),outCh=1,scaleWeights=self.scaleWeights))
 
     def forward(self, x):
         """
@@ -119,7 +118,7 @@ class Critic(nn.Module):
     def applyLastLayer(self, x):
         if self.stdGroupSize > 1 and not self.asRanker:
             x = self.miniBatchLayer(x)
-        x = x.view(x.size(0),-1)            #Get rid of trivial dimensions
+        x = x.view(x.size(0),-1)            #Unroll
         return self.fullyConnected(x)
            
     def forwardSkip_(self, x):

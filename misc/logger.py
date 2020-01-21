@@ -10,21 +10,21 @@ class _Logger:
     """
     Base class
     """
-    def __init__(trainer, tick, loops, logPath = './log/', logStep = 5, logLevel = logging.INFO):
+    def __init__(self, trainer, tick, loops, logPath = './log/', logStep = 5, logLevel = logging.INFO, device = torch.device('cpu')):
         self.logger = logging.getLogger()
         self.logger.setLevel(logging.DEBUG)
 
         #Create console handler
         self.console = logging.StreamHandler()
         self.logLevel = int(logLevel)
-        console.setLevel(self.logLevel)
+        self.console.setLevel(self.logLevel)
 
         #Create formatter
         formatter = logging.Formatter('[%(levelname)s]\t%(message)s\t(%(filename)s)')
-        console.setFormatter(formatter)
+        self.console.setFormatter(formatter)
         
         #Add handler to logger        
-        self.logger.addHandler(console)
+        self.logger.addHandler(self.console)
 
         #Loggings steps
         self.tick = int(tick)
@@ -43,6 +43,9 @@ class _Logger:
         #log path
         self.logPath = logPath
 
+        #device
+        self.device = device
+
     def _saveSnapshot(self, title=None, stateDict=None):
         """
         Saves model snapshot
@@ -60,16 +63,16 @@ class Logger(_Logger):
     Logger class to output net status, images and network snapshots for the training of the StyleGAN2 architecture
     """
     def __init__(self, trainer, latentSize = 256, resumeTraining = False, tick=1000, loops=6500, 
-                logPath='./exp1/', logStep = 10, saveImageEvery = 20, saveModelEvery = 20, logLevel = None):
+                logPath='./exp1/', logStep = 10, saveImageEvery = 20, saveModelEvery = 20, logLevel = None, device = torch.device('cpu')):
         
-        super().__init__(trainer, tick, loops, logPath, logStep, logLevel)     
+        super().__init__(trainer, tick, loops, logPath, logStep, logLevel, device = device)
         self.saveImageEvery = int(saveImageEvery*self.tick)
         self.saveModelEvery = int(saveModelEvery*self.tick)
 
         self.latentSize = int(latentSize)
         self.resumeTraining = resumeTraining       
 
-        self.z = utils.getNoise(bs = 25, latentSize = self.latentSize, device = torch.device('cpu'))
+        self.z = utils.getNoise(bs = 16, latentSize = self.latentSize, device = self.device)
         
         #monitoring parameters
         self.genLoss = 0
@@ -190,8 +193,10 @@ class Logger(_Logger):
         path = os.path.join(self.logPath,title)
         torch.save({'crit':self.trainer.crit.state_dict(), 
                         'cOptimizer':self.trainer.cOptimizer.state_dict(),
+                        'clrScheduler':self.trainer.clrScheduler.state_dict(),
                         'gen':self.trainer.gen.state_dict(), 
                         'gOptimizer':self.trainer.gOptimizer.state_dict(), 
+                        'glrScheduler':self.trainer.glrScheduler.state_dict(),
                         'imShown':self.trainer.imShown,
                         'loops':self.loops,
                         'tick':self.tick,
@@ -210,13 +215,13 @@ class Logger(_Logger):
 
     def outputPictures(self):
         """
-        outputs a grid of 25 x 25 pictures generated from the same latents
+        outputs a grid of 4 x 4 pictures generated from the same latents
         """
         
-        fake = self.trainer.gen(self.z.to(self.trainer.device)).cpu()
+        fake = self.trainer.getFakes(z = self.z)[0]
         fName = '_'.join([str(int(self.trainer.resolution)),str(int(self.trainer.imShown))+'.jpg'])
         path = os.path.join(self.logPath,fName)
-        utils.saveImage(fake, path, nrow = 5)
+        utils.saveImage(fake, path, nrow = 4)
 
 class DecoderLogger(_Logger):
     """
@@ -232,7 +237,7 @@ class DecoderLogger(_Logger):
         self.latentSize = int(latentSize)
         self.resumeTraining = resumeTraining       
 
-        z = utils.getNoise(bs = 25, latentSize = self.latentSize, device = torch.device('cpu'))
+        self.z = utils.getNoise(bs = 16, latentSize = self.latentSize, device = torch.device('cpu'))
         
         #monitoring parameters
         self.loss = 0
@@ -247,14 +252,14 @@ class DecoderLogger(_Logger):
         self.archFile = 'architecture.txt'
         self.logFile = 'netStatus.txt'
 
-    def appendLoss(self, gloss):
+    def appendLoss(self, loss):
         """
         This function will append the decoder loss to the loss variable
         """
         self.startLogging() 
         if self.logLevel > logging.INFO:
             return
-        self.loss = (self.genLoss + loss).detach().requires_grad_(False)
+        self.loss = (self.loss + loss).detach().requires_grad_(False)
         self.appended =+ 1
 
     def startLogging(self):

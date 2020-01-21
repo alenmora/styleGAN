@@ -27,7 +27,7 @@ cfg.dataLoader = CN()
 cfg.dataLoader.dataPath = './data/'     # Folder were the training data is stored
 cfg.dataLoader.resolution = 64          #Final image resolution. If not specified, gets it from the first image in the training data
 cfg.dataLoader.noChannels = 3           #Number of input and output channels. If not specified, gets it from the first image in the training data
-cfg.dataLoader.batchSize = 24
+cfg.dataLoader.batchSize = 16
 cfg.dataLoader.numWorkers = 0
 
 ############################
@@ -42,10 +42,10 @@ cfg.trainer.applyLossScaling = False   #Wether to scale any loss function before
 
 cfg.trainer.paterm = -1                #Include a pulling away term in the generator (arXiv =1609.03126v4). The user should specify if the term is as described in the original paper (by passing 0 to the flag), or centered around the similarity (by passing 1) or the squared similarity (by passing 2) of the latent vectors. -1 to deactivate
 cfg.trainer.lambg = 0.                 #Weight of the pulling-away term in the generator loss function
-cfg.trainer.gLazyReg = 32              #Number of minibatches shown before computing the regularization term for the generator (lazy regularization) 
+cfg.trainer.gLazyReg = 10              #Number of minibatches shown before computing the regularization term for the generator (lazy regularization) 
 cfg.trainer.styleMixingProb = 0.9      #Probabilty to mix styles during training
 cfg.trainer.meanPathLengthDecay = 0.01 #Decay constant for the exponential running averaging of the path length 
-cfg.trainer.pathLengthRWeight = 2      #Weight of the path regularization term in the generator loss function
+cfg.trainer.pathLengthRWeight = 2.     #Weight of the path regularization term in the generator loss function
 
 cfg.trainer.nCritPerGen = 1            #Number of critic training loops per generator training loop
 
@@ -56,7 +56,7 @@ cfg.trainer.lambR1 = 10.               #Weight of the extra R1 gradient penaliza
 
 cfg.trainer.epsilon = 1e-3             #Weight of the loss term related to the magnitud of the real samples' loss from the critic
 
-cfg.trainer.cLazyReg = 32              #Number of minibatches shown before computing the regularization term for the critic (lazy regularization) 
+cfg.trainer.cLazyReg = 20              #Number of minibatches shown before computing the regularization term for the critic (lazy regularization) 
 
 cfg.trainer.unrollCritic = 0           #For an integer greater than 1, it unrolls the critic n steps (arXiv =1611.02163v4)
 
@@ -113,7 +113,7 @@ cfg.model.crit = CN()
 
 cfg.model.crit.scaleWeights = True     #Wether to use weight scaling as in PGGAN in the discriminator
 cfg.model.crit.network = 'resnet'      #Network architecture for the critic. The other option is 'skip'
-cfg.model.crit.stdDevGroupSize = 8     #Size of the groups to calculate the std dev in the last block of the critic
+cfg.model.crit.stdDevGroupSize = 4     #Size of the groups to calculate the std dev in the last block of the critic
 
 ############################
 #  Crit optimizer Options
@@ -136,9 +136,9 @@ cfg.optim.crit.lrWDecay = 0.               #Critic weight decay constant
 cfg.logger = CN()
 
 cfg.logger.logPath = './exp1/'        #Folder were the training outputs are stored
-cfg.logger.logLevel = logging.INFO    #Use values from logging
-cfg.logger.saveModelEvery = 150.      #(Approx) Number of ticks shown before saving a checkpoint of the model
-cfg.logger.saveImageEvery = 20.       #(Approx) Number of ticks shown before generating a set of images and saving them in the log directory
+cfg.logger.logLevel = logging.ERROR   #Use values from logging: 50 
+cfg.logger.saveModelEvery = 100.      #(Approx) Number of ticks shown before saving a checkpoint of the model
+cfg.logger.saveImageEvery = 20        #(Approx) Number of ticks shown before generating a set of images and saving them in the log directory
 cfg.logger.logStep = 5.               #(Approx) Number of ticks shown before writing a log in the log directory
 
 ############################

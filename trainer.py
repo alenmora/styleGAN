@@ -42,20 +42,27 @@ class Trainer:
         copt = opt.model.crit
         goopt = opt.optim.gen
         coopt = opt.optim.crit
+
+        #CUDA configuration
+        if opt.device == 'cuda' and torch.cuda.is_available():
+            os.environ['CUDA_VISIBLE_DEVICES'] = opt.deviceId
+            torch.backends.cudnn.benchmark = True
+        else:
+            opt.device = 'cpu'
+
+        self.device = torch.device(opt.device)
        
         #logger
         self.logger_ = Logger(self, gopt.latentSize, topt.resumeTraining, opt.tick, opt.loops, lopt.logPath, lopt.logStep, 
-                                lopt.saveImageEvery, lopt.saveModelEvery, lopt.logLevel)
+                                lopt.saveImageEvery, lopt.saveModelEvery, lopt.logLevel, self.device)
         self.logger = self.logger_.logger
 
-        #CUDA configuration parameters
+        #Logging configuration parameters
         if opt.device == 'cuda':
-            os.environ['CUDA_VISIBLE_DEVICES'] = opt.deviceId
             num_gpus = len(opt.deviceId.split(','))
             self.logger.info("Using {} GPUs.".format(num_gpus))
             self.logger.info("Training on {}.\n".format(torch.cuda.get_device_name(0)))
-            torch.backends.cudnn.benchmark = True
-        self.device = torch.device(opt.device)
+            
         #data loader
         dlopt = opt.dataLoader
 
@@ -75,7 +82,7 @@ class Trainer:
 
         assert topt.lossFunc in ['NSL','WD'], self.logger.error(f'The specified loss model is not supported. Please choose between "NSL" or "WD"')
         self.lossFunc = topt.lossFunc
-        self.criterion = nn.BCEWithLogitsLoss() if self.lossFunc == 'NSL' else WassersteinLoss
+        self.criterion = NonSaturatingLoss if self.lossFunc == 'NSL' else WassersteinLoss
 
         self.applyLossScaling = bool(topt.applyLossScaling)
 
@@ -88,7 +95,7 @@ class Trainer:
 
         self.plDecay = topt.meanPathLengthDecay
 
-        self.pathRegWeight = topt.meanPathLengthRWeight
+        self.pathRegWeight = topt.pathLengthRWeight
 
         assert self.paterm is None or not self.styleMixingProb, self.logger.error('Trainer ERROR: The mixing styles regularization is not compatible with a pulling away term')
 
@@ -122,7 +129,6 @@ class Trainer:
         #Generator model parameters
         self.gen = Generator(**common, **gopt).to(self.device)
         self.latentSize = self.gen.mapping.latentSize
-        assert not self.styleMixingProb or not gopt.returnLatents, self.logger.error('Trainer ERROR: It is not possible to return the latents while performing mixing regularization')       
 
         self.logger.info(f'Generator constructed. Number of parameters {sum([np.prod([*p.size()]) for p in self.gen.parameters()])}')
 
@@ -139,7 +145,7 @@ class Trainer:
         self.gOptimizer = Adam(filter(lambda p: p.requires_grad, self.gen.parameters()), lr = glr, betas=(beta1, beta2), weight_decay=lrWDecay, eps=epsilon)
 
         if lrDecayEvery and lrDecay:
-            self.glrScheduler = lr_scheduler.StepLR(self.gOptimizer, step_size=lrDecayEvery, gamma=lrDecay)
+            self.glrScheduler = lr_scheduler.StepLR(self.gOptimizer, step_size=lrDecayEvery*self.tick, gamma=lrDecay)
         else:
             self.glrScheduler = None
 
@@ -154,7 +160,7 @@ class Trainer:
         self.cOptimizer = Adam(filter(lambda p: p.requires_grad, self.crit.parameters()), lr = clr, betas=(beta1, beta2), weight_decay=lrWDecay, eps=epsilon)
 
         if lrDecayEvery and lrDecay:
-            self.clrScheduler = lr_scheduler.StepLR(self.gOptimizer, step_size=lrDecayEvery, gamma=lrDecay)
+            self.clrScheduler = lr_scheduler.StepLR(self.gOptimizer, step_size=lrDecayEvery*self.tick, gamma=lrDecay)
         else:
             self.clrScheduler = None
 
@@ -216,6 +222,8 @@ class Trainer:
                     self.Logger_.imgCounter = stateDict['imgCounter']
                     self.cOptimizer.load_state_dict(stateDict['cOptimizer'])
                     self.gOptimizer.load_state_dict(stateDict['gOptimizer'])
+                    self.clrScheduler.load_state_dict(stateDict['clrScheduler'])
+                    self.glrScheduler.load_state_dict(stateDict['glrScheduler'])
                     self.batchShown = stateDict['batchShown']
                     self.meanPathLength = stateDict['meanPathLength']
                     self.logger.debug(f'And the optimizers states as well')
@@ -235,21 +243,26 @@ class Trainer:
         """ 
         return self.dataLoader.get(n).to(device = self.device)
 
-    def getFakes(self, n = None):
+    def getFakes(self, n = None, z = None):
         """
         Returns n fake images and their latent vectors
         """ 
         if n is None: n = self.dataLoader.batchSize
         
-        z = utils.getNoise(bs = n, latentSize = self.latentSize, device = self.device)
+        if z is None:
+            z = utils.getNoise(bs = n, latentSize = self.latentSize, device = self.device)
         
-        if self.styleMixingProb and random() < self.styleMixingProb:
-            zmix = utils.getNoise(bs = n, latentSize = self.latentSize, device = self.device)
-            zmix = (zmix - zmix.mean(dim=1, keepdim=True))/(zmix.std(dim=1, keepdim=True)+1e-8)
-            return [self.gen(z, zmix = zmix), z]
+            if self.styleMixingProb and random() < self.styleMixingProb:
+                zmix = utils.getNoise(bs = n, latentSize = self.latentSize, device = self.device)
+                zmix = (zmix - zmix.mean(dim=1, keepdim=True))/(zmix.std(dim=1, keepdim=True)+1e-8)
+                output = self.gen(z, zmix = zmix)
         
-        output = self.gen(z)
-
+            else:
+                output = self.gen(z)
+       
+        else:
+            output = self.gen(z)
+        
         if isinstance(output, list):
             return [*output, z]
         else:
@@ -270,7 +283,7 @@ class Trainer:
     def R2GradientPenalization(self, reals, fakes):
         alpha = torch.rand(reals.size(0), 1, 1, 1, device=reals.device)
         interpols = (alpha*reals + (1-alpha)*fakes).detach().requires_grad_(True)
-        cOut = self.crit(interpols)
+        cOut = self.crit(interpols).sum()
         
         if self.applyLossScaling:
             cOut = applyLossScaling(cOut)
@@ -287,8 +300,8 @@ class Trainer:
         return ((ddx.norm(dim=1)-self.obj).pow(2)).mean()/(self.obj+1e-8)**2
 
     def R1GradientPenalization(self, reals):
-        reals = reals.clone().requires_grad_(True)
-        cOut = self.crit(reals)
+        reals.requires_grad_(True)
+        cOut = self.crit(reals).sum()
 
         if self.applyLossScaling:
             cOut = applyLossScaling(cOut)
@@ -304,24 +317,27 @@ class Trainer:
 
         return 0.5*(ddx.pow(2).sum(dim=1)).mean()
 
-    def GradientPathRegularization(self, fakes, latents, meanPathLength, decay=0.01):
+    def GradientPathRegularization(self, fakes, latents):
         noise = torch.randn_like(fakes) / math.sqrt(fakes.size(2)*fakes.size(3))
 
         ddx = autograd.grad(outputs=(fakes*noise).sum(), inputs=latents, create_graph=True)[0]
 
-        pathLenghts = torch.sqrt(ddx.pow(2).sum(dim=2).mean(dim=1))
+        pathLengths = ddx.norm(dim=1)
 
-        pathMean = meanPathLength + decay* (pathLengths.mean() - meanPathLength)
+        if self.meanPathLength == 0:
+            self.meanPathLength = pathLengths.mean()
 
-        pathPenalty = (pathLengths - pathMean).pow(2).mean()
+        else:
+            self.meanPathLength = self.meanPathLength + self.plDecay*(pathLengths.mean() - self.meanPathLength)
 
-        return pathPenalty, pathmean.detach(), pathLengths
+        self.meanPathLength = self.meanPathLength.detach()
+
+        return (pathLengths - self.meanPathLength).pow(2).mean()
     
     def trainCritic(self):
         """
         Train the critic for one step and store outputs in logger
         """
-        self.crit.zero_grad()
         utils.switchTrainable(self.crit, True)
         utils.switchTrainable(self.gen, False)
 
@@ -338,10 +354,10 @@ class Trainer:
 
         loss = lossReals+lossFakes
 
-        loss.backward(); self.cOptimizer.step
+        self.crit.zero_grad()
+        loss.backward(retain_graph=True); self.cOptimizer.step
         
         if self.batchShown % self.cLazyReg == self.cLazyReg-1:
-            self.crit.zero_grad()
             extraLoss = 0
             if self.lambR2: 
                 extraLoss += self.cLazyReg*self.lambR2*self.R2GradientPenalization(real, fake)
@@ -351,17 +367,17 @@ class Trainer:
                 extraLoss += self.lambR1*self.R1GradientPenalization(real)
 
             if extraLoss > 0:
+                self.crit.zero_grad()
                 extraLoss.backward(); self.cOptimizer.step()
         
         if self.clrScheduler is not None: self.clrScheduler.step() #Reduce learning rate
 
         self.logger_.appendCLoss(loss, lossReals, lossFakes)
-        
+
     def trainGenerator(self):
         """
         Train Generator for 1 step and store outputs in logger
         """
-        self.gen.zero_grad()
         utils.switchTrainable(self.gen, True)
         utils.switchTrainable(self.crit, False)
         
@@ -370,20 +386,21 @@ class Trainer:
 
         loss = self.criterion(cFakeOut, truth = 1)
 
-        loss.backward(); self.gOptimizer.step() 
+        self.gen.zero_grad()
+        loss.backward(retain_graph=True); self.gOptimizer.step() 
 
-        if self.paterm is not None and self.batchShown % self.gLazyReg == self.gLazyReg-1:
-            self.gen.zero_grad()
-            dlatent = latents[0]
+        if self.batchShown % self.gLazyReg == self.gLazyReg-1:      
+            extraLoss = 0
+            if self.pathRegWeight > 0:
+                dlatent = latents[0]
+                extraLoss = self.GradientPathRegularization(fake, dlatent)
+                extraLoss = extraLoss*self.gLazyReg*self.pathRegWeight
 
-            extraLoss, self.meanPathLength, pathLengths = self.GradientPathRegularization(fake, dlatent, self.meanPathLength, self.plDecay)
-
-            extraLoss = extraLoss*self.gLazyReg*self.pathRegWeight
-
-            if self.lambg and self.paterm in [0,1,2]:
-                extraLoss += self.lambg*self.gen.paTerm(latent, againstInput = self.paterm)
+            if self.lambg > 0 and self.paterm is not None:
+                extraLoss += self.lambg*self.gen.paTerm(dlatent, againstInput = self.paterm)
         
             if extraLoss > 0:
+                self.gen.zero_grad()
                 extraLoss.backward(); self.gOptimizer.step() 
         
         if self.glrScheduler is not None: self.glrScheduler.step() #Reduce learning rate
