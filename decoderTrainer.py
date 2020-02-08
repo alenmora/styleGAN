@@ -2,27 +2,27 @@ import torch.nn as nn
 import torch 
 import numpy as np
 from torch.optim import Adam, lr_scheduler
-from datetime import datetime
-from config import config 
-import utils
-from decoderDataLoader import DecoderDataLoader
-from logger import DecoderLogger
+from misc import utils
+from misc.logger import DecoderLogger
+from models.generatorNetwork import Generator
+from models.decoderNetwork import Decoder
 import os
 import math
 import copy
 from random import random
+import argparse
 
 class DecoderTrainer:
     """
     Trainer class for the decoder
     """
     def __init__(self, config):
-lopt = opt.logger
+        lopt = opt.logger
         topt = opt.trainer
         mopt = opt.model
         gopt = opt.model.gen
         copt = opt.model.crit
-        dopt = opt.model.dec
+        dopt = opt.dec
         doopt = opt.optim.dec
        
         #logger
@@ -96,9 +96,9 @@ lopt = opt.logger
                 
                 if dopt.useCriticWeights or dopt.resumeTraining:
                     if 'dec' in stateDict.keys():
-                        self.dec.load_state_dict(stateDict['dec']) #First, try to load a decoder dictionary
+                        self.decoder.load_state_dict(stateDict['dec']) #First, try to load a decoder dictionary
                     else:
-                        self.dec.load_state_dict(stateDict['crit'], strict=False) #Last layer won't match, so make strict = False      
+                        self.decoder.load_state_dict(stateDict['crit'], strict=False) #Last layer won't match, so make strict = False      
                     
                     self.logger.info(f'Loaded critic trained weights from {dir}')
 
@@ -146,7 +146,7 @@ lopt = opt.logger
         
         # fake
         ims, w = self.getBatch()
-        dout = self.dec(ims)
+        dout = self.decoder(ims)
         
         loss = self.decoderLoss(dout, w)
 

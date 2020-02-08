@@ -16,7 +16,7 @@ cfg.deviceId = '0'
 cfg.preWtsFile = ""              # File to get the pretrained weights from
 
 cfg.tick = 1000                  #Unit of images shown (to make input compact)
-cfg.loops = 6500                 #Total number of training ticks
+cfg.loops = 3000                 #Total number of training ticks
 
 ############################
 #  Data options
@@ -40,10 +40,10 @@ cfg.trainer.resumeTraining = False     #Wether to resume a previous training. Th
 cfg.trainer.lossFunc = 'NSL'           #Loss model used. Default is Non Saturating Loss (NSL). The other options are Wasserstein's Distance (WD) and Logistic
 cfg.trainer.applyLossScaling = False   #Wether to scale any loss function before calculating any gradient penalization term or not
 
-cfg.trainer.paterm = -1                #Include a pulling away term in the generator (arXiv =1609.03126v4). The user should specify if the term is as described in the original paper (by passing 0 to the flag), or centered around the similarity (by passing 1) or the squared similarity (by passing 2) of the latent vectors. -1 to deactivate
+cfg.trainer.paterm = False             #Include a pulling away term in the generator , similar to arXiv =1609.03126v4
 cfg.trainer.lambg = 0.                 #Weight of the pulling-away term in the generator loss function
 cfg.trainer.gLazyReg = 10              #Number of minibatches shown before computing the regularization term for the generator (lazy regularization) 
-cfg.trainer.styleMixingProb = 0.9      #Probabilty to mix styles during training
+cfg.trainer.styleMixingProb = 0.5      #Probabilty to mix styles during training
 cfg.trainer.meanPathLengthDecay = 0.01 #Decay constant for the exponential running averaging of the path length 
 cfg.trainer.pathLengthRWeight = 2.     #Weight of the path regularization term in the generator loss function
 
@@ -79,16 +79,17 @@ cfg.model.sampleMode = 'bilinear'   #Algorithm to use for upsampling and downsam
 
 cfg.model.gen = CN()
 
-cfg.model.gen.psiCut = 0.8                   #Value at which to apply the psi truncation cut in the generator disentangled latent
-cfg.model.gen.maxCutLayer = -1               #Maximum generator layer at which to apply the psi cut (-1 = last layer)
-cfg.model.gen.synthesisNetwork = 'skip'      #Network architecture for the generator synthesis. The other option is 'resnet'
-cfg.model.gen.latentSize = 256               #Size of the latent vector (z)
-cfg.model.gen.dLatentSize = 256              #Size of the disentangled latent vector (w)
-cfg.model.gen.normalizeLatents = False       #Wether to normalize the latent vector (z) before feeding it to the mapping network
-cfg.model.gen.mappingLayers = 4              #Number of mapping layers
-cfg.model.gen.neuronsInMappingLayers = 256   #Number of neurons in each of the mapping layers 
-cfg.model.gen.randomizeNoise = False         #Wether to randomize noise inputs every time
-cfg.model.gen.scaleWeights = False           #Wether to scale the weights for equalized learning
+cfg.model.gen.makeConstantInputTrainable = True  #Wether to train the constant input in the generator, or leave it as a tensor of ones
+cfg.model.gen.psiCut = 0.8                       #Value at which to apply the psi truncation cut in the generator disentangled latent
+cfg.model.gen.maxCutLayer = -1                   #Maximum generator layer at which to apply the psi cut (-1 = last layer)
+cfg.model.gen.synthesisNetwork = 'skip'          #Network architecture for the generator synthesis. The other option is 'resnet'
+cfg.model.gen.latentSize = 256                   #Size of the latent vector (z)
+cfg.model.gen.dLatentSize = 256                  #Size of the disentangled latent vector (w)
+cfg.model.gen.normalizeLatents = False           #Wether to normalize the latent vector (z) before feeding it to the mapping network
+cfg.model.gen.mappingLayers = 4                  #Number of mapping layers
+cfg.model.gen.neuronsInMappingLayers = 256       #Number of neurons in each of the mapping layers 
+cfg.model.gen.randomizeNoise = False             #Wether to randomize noise inputs every time
+cfg.model.gen.scaleWeights = False               #Wether to scale the weights for equalized learning
 
 cfg.optim = CN()
 ############################
@@ -97,12 +98,12 @@ cfg.optim = CN()
 
 cfg.optim.gen = CN()
 
-cfg.optim.gen.lr = 0.003
+cfg.optim.gen.lr = 0.001
 cfg.optim.gen.beta1 = 0.
 cfg.optim.gen.beta2 = 0.99
 cfg.optim.gen.eps = 1e-8
 cfg.optim.gen.lrDecay =0.1                #Generator learning rate decay constant 
-cfg.optim.gen.lrDecayEvery = 2000         #(Approx) Number of ticks shown before applying the decay to the generator learning rate
+cfg.optim.gen.lrDecayEvery = 1000         #(Approx) Number of ticks shown before applying the decay to the generator learning rate
 cfg.optim.gen.lrWDecay = 0.               #Generator weight decay constant
 
 ############################
@@ -111,7 +112,7 @@ cfg.optim.gen.lrWDecay = 0.               #Generator weight decay constant
 
 cfg.model.crit = CN()
 
-cfg.model.crit.scaleWeights = True     #Wether to use weight scaling as in PGGAN in the discriminator
+cfg.model.crit.scaleWeights = True     #Wether to use weight scaling as in ProGAN in the discriminator
 cfg.model.crit.network = 'resnet'      #Network architecture for the critic. The other option is 'skip'
 cfg.model.crit.stdDevGroupSize = 4     #Size of the groups to calculate the std dev in the last block of the critic
 
@@ -121,12 +122,12 @@ cfg.model.crit.stdDevGroupSize = 4     #Size of the groups to calculate the std 
 
 cfg.optim.crit = CN()
 
-cfg.optim.crit.lr = 0.003
+cfg.optim.crit.lr = 0.001
 cfg.optim.crit.beta1 = 0.
 cfg.optim.crit.beta2 = 0.99
 cfg.optim.crit.eps = 1e-8
 cfg.optim.crit.lrDecay =0.1                #Critic learning rate decay constant 
-cfg.optim.crit.lrDecayEvery = 2000         #(Approx) Number of ticks shown before applying the decay to the critic learning rate
+cfg.optim.crit.lrDecayEvery = 1000         #(Approx) Number of ticks shown before applying the decay to the critic learning rate
 cfg.optim.crit.lrWDecay = 0.               #Critic weight decay constant
 
 ############################
@@ -135,10 +136,10 @@ cfg.optim.crit.lrWDecay = 0.               #Critic weight decay constant
 
 cfg.logger = CN()
 
-cfg.logger.logPath = './exp1/'        #Folder were the training outputs are stored
-cfg.logger.logLevel = logging.ERROR   #Use values from logging: 50 
-cfg.logger.saveModelEvery = 100.      #(Approx) Number of ticks shown before saving a checkpoint of the model
-cfg.logger.saveImageEvery = 20        #(Approx) Number of ticks shown before generating a set of images and saving them in the log directory
+cfg.logger.logPath = './exp4/'        #Folder were the training outputs are stored
+cfg.logger.logLevel = logging.INFO    #Use values from logging: 50 
+cfg.logger.saveModelEvery = 35.       #(Approx) Number of ticks shown before saving a checkpoint of the model
+cfg.logger.saveImageEvery = 35.       #(Approx) Number of ticks shown before generating a set of images and saving them in the log directory
 cfg.logger.logStep = 5.               #(Approx) Number of ticks shown before writing a log in the log directory
 
 ############################

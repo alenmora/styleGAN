@@ -1,0 +1,14 @@
+loops: 2000
+preWtsFile: "./exp5/modelCheckpoint_350000_256.pth.tar"
+trainer:
+  lambg: 0.001
+  paterm: True
+  resumeTraining: True
+model:
+  gen:
+    psiCut: 1.
+    normalizeLatents: True
+    makeConstantInputTrainable: False
+logger:
+  logPath: './exp5/'
+

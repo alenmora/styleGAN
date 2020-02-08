@@ -41,7 +41,7 @@ class _Logger:
         self.logFile = 'netStatus.txt'
 
         #log path
-        self.logPath = logPath
+        self.logPath = utils.createDir(logPath)
 
         #device
         self.device = device
@@ -72,7 +72,15 @@ class Logger(_Logger):
         self.latentSize = int(latentSize)
         self.resumeTraining = resumeTraining       
 
-        self.z = utils.getNoise(bs = 16, latentSize = self.latentSize, device = self.device)
+        z = utils.getNoise(bs = 4, latentSize = self.latentSize, device = self.device)
+        
+        zs = []
+        for i in range(4):
+            alpha = 2*(3-i)/3
+            interp = z*(alpha - 1)
+            zs.append(interp)
+
+        self.z = torch.cat(zs, dim=0)
         
         #monitoring parameters
         self.genLoss = 0
@@ -312,7 +320,7 @@ class DecoderLogger(_Logger):
         imShown = int(self.trainer.imShown)
         
         # Average all stats and log
-        dl = self.loss.item()/self.appended if self.Appended != 0 else 0.
+        dl = self.loss.item()/self.appended if self.appended != 0 else 0.
         
         stats = f' {datetime.now():%H:%M (%d/%m)}'
         leadingSpaces = 9-len(str(imShown))
@@ -335,6 +343,7 @@ class DecoderLogger(_Logger):
         path = os.path.join(self.logPath,title)
         torch.save({'dec':self.trainer.dec.state_dict(), 
                     'dOptimizer':self.trainer.dOptimizer.state_dict(),
+                    'dlrScheduler':self.trainer.dlrScheduler.state_dict(),
                     'imShown':self.trainer.imShown,
                     'loops':self.loops,
                     'tick':self.tick,

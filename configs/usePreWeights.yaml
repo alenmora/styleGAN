@@ -1,6 +1,8 @@
 trainer:
-  resumeTraining: False
+  resumeTraining: True
+  lambg: 0.1
+  paterm: 1
 logger:
-  logPath: './exp1/'
-preWtsFile: '/home/amora/styleGAN/exp1/modelCheckpoint_300000_256.pth.tar'
+  logPath: './exp3/'
+preWtsFile: '/home/amora/styleGAN/exp3/modelCheckpoint_2500000_256.pth.tar'
 

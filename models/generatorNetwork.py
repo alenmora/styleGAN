@@ -14,7 +14,7 @@ class Generator(nn.Module):
     def __init__(self, latentSize = 256, dLatentSize = 256, mappingLayers = 4, neuronsInMappingLayers = 256, normalizeLatents = True,
                 resolution = 64, fmapBase = 2048, fmapDecay = 1, fmapMax = 256, fmapMin = 1, randomizeNoise = False, 
                 activation = 'lrelu', scaleWeights = False, outCh = 3, upsample = 'bilinear', synthesisMode = 'skip', psiCut = 0.7,
-                maxCutLayer = -1, **kwargs):
+                maxCutLayer = -1, makeConstantInputTrainable = True, **kwargs):
         
         super().__init__()
 
@@ -29,7 +29,7 @@ class Generator(nn.Module):
         
         nf1 = np.clip(int(fmapBase /2.0 ** (fmapDecay)), fmapMin, fmapMax)
 
-        self.cInput = constantInput(nf1, resol = 4)
+        self.cInput = constantInput(nf1, resol = 4, makeTrainable = makeConstantInputTrainable)
         
         self.synthesis = Synthesis(dLatentSize = dLatentSize, resolution = resolution, fmapBase = fmapBase, fmapDecay = fmapDecay, fmapMax = fmapMax, 
                                 fmapMin = fmapMin, randomizeNoise = randomizeNoise, activation = activation, scaleWeights = scaleWeights, outCh = 3, 
@@ -76,39 +76,36 @@ class Generator(nn.Module):
 
         return [output, w]
         
-    def paTerm(self, w, againstInput = 1):
+    def paTerm(self, z):
         """
         Calculates the pulling away term, as explained in arXiv:1609.03126v4.
         Believed to improve the variance of the generator and avoid mode collapse
         z (tensor): latent vector
-        againstInput (int): if 0, the penalty terms will be centered around zero; if 1, around the disentangled latent vectors cosine similariries; if 2, around the square of the cosine similarities
         """
-        bs = w.size(0)
+        bs = z.size(0)
 
         if  bs < 2: #Nothing to do if we only generate one candidate
             return 0
         
+        w = self.mapping.forward(z)
         x = self.cInput(w)
-        
+
         fakes = self.synthesis.forward(x, w)
+        
         nCh = fakes.size(1)
         
-        w = w.view(bs, -1) #Unroll
         fakes = fakes.view(bs, nCh, -1)  #N x nCh x (h*w)
-        npix = fakes.size(2)
 
         #Calculate pair-wise cosine similarities between batch elements        
         suma = 0
         for i in range(bs):
             for j in range(i+1,bs):
-                fakesim = torch.nn.functional.cosine_similarity(fakes[i],fakes[j],dim=0).sum() #Sum how similar are the colors of each pixel
-                if againstInput == 0:
-                    suma = suma + fakesim**2
-                elif againstInput == 1:
-                    wsim = npix*torch.nn.functional.cosine_similarity(w[i],w[j],dim=0)
-                    suma = suma + (wsim-fakesim)**2
-                elif againstInput == 2:
-                    wsim = npix*torch.nn.functional.cosine_similarity(w[i],w[j],dim=0)
-                    suma = suma + (wsim**2-fakesim**2)**2
-
+                fakesim = torch.nn.functional.cosine_similarity(fakes[i],fakes[j],dim=0).mean()
+                wsim = torch.nn.functional.cosine_similarity(w[i],w[j],dim=0)
+                zsim = torch.nn.functional.cosine_similarity(z[i],z[j],dim=0)
+                
+                diff1 = (zsim-wsim)**2/(zsim**2 + 1e-8)
+                diff2 = (fakesim-wsim)**2/(wsim**2 + 1e-8)
+                suma = suma + (diff1+diff2)/2
+                
         return suma/(bs*(bs-1))

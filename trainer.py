@@ -86,7 +86,7 @@ class Trainer:
 
         self.applyLossScaling = bool(topt.applyLossScaling)
 
-        self.paterm = int(topt.paterm) if int(topt.paterm) in [0,1,2] else None
+        self.paterm = topt.paterm
         self.lambg = float(topt.lambg)
         self.gLazyReg = max(topt.gLazyReg,1)
         self.styleMixingProb = float(topt.styleMixingProb)
@@ -96,8 +96,6 @@ class Trainer:
         self.plDecay = topt.meanPathLengthDecay
 
         self.pathRegWeight = topt.pathLengthRWeight
-
-        assert self.paterm is None or not self.styleMixingProb, self.logger.error('Trainer ERROR: The mixing styles regularization is not compatible with a pulling away term')
 
         assert topt.nCritPerGen > 0, self.logger.error(f'Trainer ERROR: The number of critic training loops per generator loop should be an integer >= 1 (got {topt.nCritPerGen})')
         self.nCritPerGen = int(topt.nCritPerGen)
@@ -183,7 +181,7 @@ class Trainer:
         
         hyperParams = (f'HYPERPARAMETERS - res = {self.resolution}|bs = {self.dataLoader.batchSize}|cLR = {clr}|gLR = {glr}|lambdaR2 = {self.lambR2}|'
                       f'obj = {self.obj}|lambdaR1 = {self.lambR1}|epsilon = {self.epsilon}|{self.loops} loops, showing {self.tick} images per loop'
-                      f'|Using pulling away regularization? {f"Yes, with value {self.paterm}" if self.paterm is not None else "No"}')
+                      f'|Using pulling away regularization? {"Yes" if self.paterm  else "No"}')
         
         architecture = '\n' + str(self.crit) + '\n\n' + str(self.gen) + '\n\n'
         
@@ -211,15 +209,15 @@ class Trainer:
                     self.imShown = stateDict['imShown']
                     self.loops = stateDict['loops']
                     self.tick = stateDict['tick']
-                    self.Logger_.genLoss = stateDict['genLoss']
-                    self.Logger_.criticLoss = stateDict['criticLoss']
-                    self.Logger_.criticLossReals = stateDict['criticLossReals']
-                    self.Logger_.criticLossFakes = stateDict['criticLossFakes']
-                    self.Logger_.logCounter = stateDict['logCounter']
-                    self.Logger_.ncAppended = stateDict['ncAppended']
-                    self.Logger_.ngAppended = stateDict['ngAppended']
-                    self.Logger_.snapCounter = stateDict['snapCounter']
-                    self.Logger_.imgCounter = stateDict['imgCounter']
+                    self.logger_.genLoss = stateDict['genLoss']
+                    self.logger_.criticLoss = stateDict['criticLoss']
+                    self.logger_.criticLossReals = stateDict['criticLossReals']
+                    self.logger_.criticLossFakes = stateDict['criticLossFakes']
+                    self.logger_.logCounter = stateDict['logCounter']
+                    self.logger_.ncAppended = stateDict['ncAppended']
+                    self.logger_.ngAppended = stateDict['ngAppended']
+                    self.logger_.snapCounter = stateDict['snapCounter']
+                    self.logger_.imgCounter = stateDict['imgCounter']
                     self.cOptimizer.load_state_dict(stateDict['cOptimizer'])
                     self.gOptimizer.load_state_dict(stateDict['gOptimizer'])
                     self.clrScheduler.load_state_dict(stateDict['clrScheduler'])
@@ -229,8 +227,8 @@ class Trainer:
                     self.logger.debug(f'And the optimizers states as well')
                 
                 return True
-            except:
-                self.logger.error(f'ERROR: The weights in {dir} could not be loaded. Proceding from zero...')
+            except Exception as e:
+                self.logger.error(f'ERROR: The weights in {dir} could not be loaded\n {str(e)}\n Proceding from zero...')
                 return False
         else:
             self.logger.error(f'ERROR: The file {dir} does not exist. Proceding from zero...')    
@@ -354,21 +352,16 @@ class Trainer:
 
         loss = lossReals+lossFakes
 
-        self.crit.zero_grad()
-        loss.backward(retain_graph=True); self.cOptimizer.step
-        
         if self.batchShown % self.cLazyReg == self.cLazyReg-1:
-            extraLoss = 0
             if self.lambR2: 
-                extraLoss += self.cLazyReg*self.lambR2*self.R2GradientPenalization(real, fake)
+                loss += self.cLazyReg*self.lambR2*self.R2GradientPenalization(real, fake)
             if self.epsilon: 
-                extraLoss += self.epsilon*(cRealOut**2).mean()
+                loss += self.epsilon*(cRealOut**2).mean()
             if self.lambR1: 
-                extraLoss += self.lambR1*self.R1GradientPenalization(real)
+                loss += self.lambR1*self.R1GradientPenalization(real)
 
-            if extraLoss > 0:
-                self.crit.zero_grad()
-                extraLoss.backward(); self.cOptimizer.step()
+        self.cOptimizer.zero_grad()      
+        loss.backward(); self.cOptimizer.step()
         
         if self.clrScheduler is not None: self.clrScheduler.step() #Reduce learning rate
 
@@ -386,22 +379,18 @@ class Trainer:
 
         loss = self.criterion(cFakeOut, truth = 1)
 
-        self.gen.zero_grad()
-        loss.backward(retain_graph=True); self.gOptimizer.step() 
-
         if self.batchShown % self.gLazyReg == self.gLazyReg-1:      
-            extraLoss = 0
             if self.pathRegWeight > 0:
                 dlatent = latents[0]
-                extraLoss = self.GradientPathRegularization(fake, dlatent)
-                extraLoss = extraLoss*self.gLazyReg*self.pathRegWeight
+                loss += self.GradientPathRegularization(fake, dlatent)*self.gLazyReg*self.pathRegWeight
 
-            if self.lambg > 0 and self.paterm is not None:
-                extraLoss += self.lambg*self.gen.paTerm(dlatent, againstInput = self.paterm)
+            if self.lambg > 0 and self.paterm:
+                latent = latents[-1]
+                pat = self.gen.paTerm(latent)*self.lambg*self.gLazyReg
+                loss += pat
         
-            if extraLoss > 0:
-                self.gen.zero_grad()
-                extraLoss.backward(); self.gOptimizer.step() 
+        self.gOptimizer.zero_grad()
+        loss.backward(); self.gOptimizer.step() 
         
         if self.glrScheduler is not None: self.glrScheduler.step() #Reduce learning rate
                 

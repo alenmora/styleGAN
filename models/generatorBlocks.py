@@ -2,13 +2,14 @@ import torch
 import torch.nn as nn
 import numpy as np 
 from torch.nn import functional as F
-from models.commonBlocks import Linear, Conv2D, ModulatedConv2D, getActivation
+from models.commonBlocks import PixelNorm, Linear, Conv2D, ModulatedConv2D, getActivation
 
 class constantInput(nn.Module):
-    def __init__(self, nCh, resol=4):
+    def __init__(self, nCh, resol=4, makeTrainable = True):
         super().__init__()
 
         self.cInput = nn.Parameter(torch.randn(1,nCh,4,4)) #Constant random input
+        self.cInput.requires_grad_(makeTrainable)
 
     def forward(self, input):
         batchSize = input.size(0)
@@ -21,13 +22,12 @@ class Mapping(nn.Module):
     """    
     
     def __init__(self, latentSize=256, dLatentSize=256, mappingLayers = 4, neuronsInMappingLayers = 256, lrmul = 0.01, 
-                activation = 'lrelu', scaleWeights = False, normalizeLatents = True, **kwargs):
+                activation = 'lrelu', scaleWeights = False, normalizeLayers = False, **kwargs):
         super().__init__()
         self.latentSize = latentSize
         self.dLatentSize = dLatentSize
         self.mappingLayers = mappingLayers
         assert self.mappingLayers > 0, 'Mapping Module ERROR: The number of mapping layers should be a positive integer' 
-        self.normalizeLatents = normalizeLatents
         self.scaleWeights = scaleWeights
         self.nNeurons = neuronsInMappingLayers
         self.activation = getActivation(activation)
@@ -40,6 +40,7 @@ class Mapping(nn.Module):
             outCh = self.nNeurons if layerId != (self.mappingLayers-1) else self.dLatentSize
             mods.append(Linear(inCh, outCh, scaleWeights=self.scaleWeights, lrmul=self.lrmul))
             mods.append(self.activation)
+            if normalizeLayers: mods.append(PixelNorm())
             inCh = outCh
 
         self.map = nn.Sequential(*mods)
@@ -56,25 +57,18 @@ class NoiseLayer(nn.Module):
     """
     Module that adds the noise to the ModulatedConv2D output
     """
-    def __init__(self, outCh, randomizeNoise = False):
+    def __init__(self, outCh, resolution, randomizeNoise = False):
         super().__init__()
-        self.noise = None
+        self.noise = torch.randn(1,1,resolution,resolution)   
         self.register_buffer('cached_noise', self.noise)
         self.randomizeNoise = randomizeNoise
         self.weights = nn.Parameter(torch.zeros(1,outCh,1,1), requires_grad=True)
         self.name = 'Noise layer: '+str(outCh)
 
-    def forward(self, x):
-        if self.randomizeNoise:
-            noise = torch.randn(1,1,x.size(2),x.size(3), device=x.device)
-            return x+self.weights*noise
-        elif self.noise is None:
-            self.noise = torch.randn(1,1,x.size(2),x.size(3), device=x.device)   
-            self.register_buffer('cached_noise',self.noise)
-            return x+self.weights*self.noise
-        else:
-            return x+self.weights*self.noise
-
+    def forward(self, x): 
+        noise = torch.randn(1,1,x.size(2),x.size(3), device=x.device) if self.randomizeNoise else self.noise.to(x.device)
+        return x+self.weights*noise
+        
     def __repr__(self):
         return self.name
 
@@ -82,11 +76,12 @@ class StyledConv2D(nn.Module):
     """
     Module representing the mixing of a modulated 2DConv and noise addition
     """
-    def __init__(self, styleCh, inCh, outCh, kernelSize, padding='same', gain=np.sqrt(2), bias=False, lrmul = 1, scaleWeights=True, demodulate = True, randomizeNoise = False, activation = 'lrelu'):
+    def __init__(self, styleCh, inCh, outCh, kernelSize, resolution, padding='same', gain=np.sqrt(2), bias=False, lrmul = 1, scaleWeights=True, 
+    demodulate = True, randomizeNoise = False, activation = 'lrelu'):
         super().__init__()
 
         self.conv = ModulatedConv2D(styleCh, inCh, outCh, kernelSize, padding=padding, gain=gain, bias=bias, lrmul=lrmul, scaleWeights=scaleWeights, demodulate=demodulate)
-        self.noise = NoiseLayer(outCh, randomizeNoise=randomizeNoise)
+        self.noise = NoiseLayer(outCh, resolution, randomizeNoise=randomizeNoise)
         self.activation = getActivation(activation)
     
     def forward(self, x, y):
@@ -123,7 +118,8 @@ class Synthesis(nn.Module):
     StyleGAN2 original synthesis network
     """    
     def __init__(self, dLatentSize = 256, resolution = 64, fmapBase = 2048, fmapDecay = 1, fmapMax = 256, fmapMin = 1,
-                randomizeNoise = False, activation = 'lrelu', scaleWeights = False, outCh = 3, upsample = 'bilinear', mode = 'skip', **kwargs):
+                randomizeNoise = False, activation = 'lrelu', scaleWeights = False, outCh = 3, upsample = 'bilinear', mode = 'skip', 
+                normalizeLayers = False,**kwargs):
         super().__init__()
         self.dLatentSize = dLatentSize
         self.resolution = resolution
@@ -135,6 +131,7 @@ class Synthesis(nn.Module):
         self.upsample = upsample
         self.mode = mode
         self.outCh = outCh
+        self.normalizeLayers = normalizeLayers
 
         assert self.mode in ['skip','resnet'], f'Generator ERROR: Invalid synthesis network architecture {self.mode}'
         
@@ -149,6 +146,8 @@ class Synthesis(nn.Module):
         self.styleConvs = nn.ModuleList()   #Keeps the style convolutional modules
         self.toRGB = nn.ModuleList()        #Keeps the ToRGB modules
         self.lp = nn.ModuleList()           #Keeps the 2DConv modules for linear projection when performing resnet architecture
+        
+        if self.normalizeLayers: self.normalizer = PixelNorm()       #Pixel normalizer
 
         def layer(kernel, layerId): #Constructor of layers
             resol = int(2**((layerId+5)//2)) #Recover the resolution of the current layer from its id (0 --> 4), (1 --> 8), (2 --> 8), (3 --> 16),...
@@ -165,7 +164,7 @@ class Synthesis(nn.Module):
                         self.lp.append(Conv2D(inCh=inCh, outCh=outCh, kernelSize=1))
 
             #Add the required modulated convolutional module
-            self.styleConvs.append(StyledConv2D(styleCh=self.dLatentSize, inCh=inCh, outCh=outCh, kernelSize=kernel, randomizeNoise=randomizeNoise, activation=activation))
+            self.styleConvs.append(StyledConv2D(styleCh=self.dLatentSize, inCh=inCh, outCh=outCh, kernelSize=kernel, resolution=resol, randomizeNoise=randomizeNoise, activation=activation))
             
         for layerId in range(self.nLayers): #Create the layers from to self.nLayers-1
             layer(kernel=3, layerId=layerId)  
@@ -228,6 +227,8 @@ class Synthesis(nn.Module):
                 output = F.interpolate(output, scale_factor=2, mode=self.upsample, align_corners=False)
 
             x = self.styleConvs[layer](x, w)
+            if self.normalizeLayers:
+                x = self.normalizer(x)
 
             if not layer % 2:  #Even layer, so get the generated output for the given resolution, resize it, and add it to the final output
                 output = output + self.toRGB[layer//2](x, w)
@@ -252,6 +253,8 @@ class Synthesis(nn.Module):
                 carryover = F.interpolate(carryover, scale_factor=2, mode=self.upsample, align_corners=False)
 
             x = self.styleConvs[layer](x, w)
+            if self.normalizeLayers:
+                x = self.normalizer(x)
 
             if not layer % 2:  #Even layer, so add and actualize carryover value
                 if carryover is not None: #If there is a carryover, add it to the output
