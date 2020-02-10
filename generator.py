@@ -1,5 +1,6 @@
 import torch
 from models.generatorNetwork import Generator
+from torch import FloatTensor as FT
 from misc import utils
 import os
 import argparse
@@ -23,14 +24,14 @@ def loadPretrainedWts(dir):
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser('StyleGAN_GEN')
-    parser.add_argument('--nImages', type=int, default=100)
+    parser.add_argument('--nImages', type=int, default=20)
     # When sampling the latent vector during training, extreme values are less likely to appear, 
     # and hence the generator is not sufficiently trained in these regions. Hence, we limit the 
     # values of the latent vector to be inside (-psiCut, psiCut)
-    parser.add_argument('--psiCut', type=float, default=0.7)        
+    parser.add_argument('--psiCut', type=float, default=0.2)        
     parser.add_argument('--latentSize', nargs='?', type=int)
     parser.add_argument('--nChannels', type=int, default=3)
-    parser.add_argument('--wtsFile', type=str, default='./pretrainedModels/64x64_final_paterm_nopsicut_nogridtrain_256.pth.tar')
+    parser.add_argument('--wtsFile', type=str, default='./pretrainedModels/64x64_modelCheckpoint_semifinal_paterm_nopsicut_nogridtrain_256.pth.tar')
     parser.add_argument('--outputFolder', type=str, default='./generatedImages/')
     parser.add_argument('--outputFile', type=str, nargs='?')
     parser.add_argument('--config', nargs='?', type=str)
@@ -79,11 +80,13 @@ if __name__ == "__main__":
 
     z = utils.getNoise(bs = n, latentSize = latentSize, device = device)
     
-    ext_comp = z.abs() > abs(cut)
+    ext_comp = (z.abs() > abs(cut)).type(FT)
+
+
 
     while ext_comp.sum() > 0:
         z = z*(1-ext_comp)+utils.getNoise(bs = n, latentSize = latentSize, device = device)*z*abs(cut)
-        ext_comp = z.abs() > abs(cut)
+        ext_comp = (z.abs() > abs(cut)).type(FT)
     
     if cut < 0: z = -z
     
